@@ -1,0 +1,37 @@
+# macOS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Android / Gradle local and generated files
+.gradle/
+**/build/
+local.properties
+captures/
+.cxx/
+.externalNativeBuild/
+
+# Secrets and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+secrets.properties
+*.pem
+*.p12
+*.pfx
+*.token
+gitee_pat.txt
+credentials.json
+credentials.yml
+credentials.yaml
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
