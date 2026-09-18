@@ -6,6 +6,8 @@
 
 # Android / Gradle local and generated files
 .gradle/
+build/
+*/build/
 **/build/
 local.properties
 captures/
@@ -16,22 +18,60 @@ captures/
 .env
 .env.*
 !.env.example
+*.env
+secrets/
+private/
+*.secret
+*.token
 *.jks
 *.keystore
 keystore.properties
 signing.properties
 secrets.properties
 *.pem
+*.key
 *.p12
 *.pfx
-*.token
 gitee_pat.txt
 credentials.json
 credentials.yml
 credentials.yaml
+cookies.txt
+session.json
+auth.json
+id_rsa
+id_ed25519
+id_ecdsa
+
+# Runtime private data
+diagnostics/private/
+diagnostics/local/
+logs/private/
+errors/private/
+screenshots/private/
+tmp/
+cache/
+
+# ADB / device dumps
+adb/
+device-dumps/
+uiautomator/
+logcat/
+*.logcat
+crash-dumps/
+tombstones/
+*.dump
+*.dmp
+*.hprof
 
 # Logs and temporary files
 *.log
 *.tmp
 *.swp
 *~
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc

@@ -93,3 +93,48 @@ git diff <上一已验收commit>..<当前commit>
 - Token、密码、Gitee PAT、签名文件、`local.properties`、环境变量文件及其他凭据禁止提交。
 - 提交前检查 `git status`、暂存区差异和敏感信息。
 - 诊断数据提交前必须确认不含账号、设备标识、凭据和其他隐私信息。
+
+## Public Repository Security Policy
+
+### 数据边界
+
+Gitee 公开仓库允许保存：
+
+- 源码、开发文档、需求和 Review
+- 已脱敏的实施报告、交接文件和问题摘要
+- 不含真实值的配置模板
+- 已确认不含个人、账号、设备或网络标识的攻略与技能数据库
+
+Mac 本地 `~/.config/yishijieyongzhe/` 保存：
+
+- Token、密码、Cookie、Session、OAuth 和其他 Secret
+- 设备凭据、ADB 地址、配对码、序列号和网络信息
+- 完整日志、原始 logcat、crash dump 和错误截图
+- APK 签名文件、keystore 及其密码
+
+敏感目录和文件权限应分别设置为 `700` 和 `600`。长期保存的 PAT、API Token 和签名密码优先使用 macOS Keychain；需要读取配置时按以下顺序处理：
+
+1. Environment Variables
+2. macOS Keychain
+3. `~/.config/yishijieyongzhe/*.env`
+4. 安全默认值或仅报告缺失的配置项名称
+
+任何 Secret 均不得写入源码、文档、报告、交接文件、提交信息或普通日志，也不得在错误信息中回显。业务代码应通过统一配置读取层访问敏感信息。
+
+### 日志、诊断和截图
+
+- 完整日志、原始 logcat、crash dump 和错误截图默认只保存在本地私有目录。
+- 公开仓库仅保存错误编号、状态机节点、非敏感错误信息和已脱敏诊断字段。
+- 截图提交前必须人工检查账号、昵称、通知、网络信息、Token、聊天内容、二维码和个人数据并完成脱敏。
+- 二进制截图无法由文本扫描器可靠验证，必须保留人工复核环节。
+- 仓库公开前必须检查 Git 作者姓名和邮箱等提交元数据；如需隐藏，应先配置公开安全的身份，再经用户确认后重写历史。
+
+### 提交前安全检查
+
+每次提交和生成公开交接材料前执行：
+
+```bash
+python3 tools/security/check_public_repo.py --history
+```
+
+扫描失败时必须阻止提交，只报告规则名、文件和行号，不得回显匹配内容。若真实 Secret 曾进入 Git 历史，应立即作废并重新生成；历史重写必须在用户明确确认后进行。
