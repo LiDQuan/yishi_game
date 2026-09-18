@@ -2,99 +2,60 @@
 
 ## 当前任务编号
 
-REQ-0002
+REQ-0004
 
 ## 当前版本
 
-公开仓库安全基线（未发布）
+Android M0 基础设施（实现提交 `799c044380766dbb13a234665d919fc842136bed`）
 
 ## 本次修改摘要
 
-强化敏感文件隔离，建立本地私有数据目录、公开配置样例、全历史安全扫描器和公开仓库协作政策。
+新增可构建的 Kotlin/Compose Android 应用，包含安全状态机、无障碍与 MediaProjection 骨架、Room 数据层、响应式平板 UI、私有 Pad Inspector、自动化测试和 Gradle Wrapper。M0 不执行任何游戏自动化动作。
 
 ## 完整 commit hash
 
-`3fe0b734699111857d3ef74acf97898242a3845a`
+`799c044380766dbb13a234665d919fc842136bed`
 
-该 hash 为安全改造实现提交；本文件、IMPLEMENT 报告和 patch 由后续元数据提交归档。
+该 hash 是待复审的实现提交；本交接文件和 IMPLEMENT 报告由后续元数据提交归档。
 
 ## git diff --stat
 
 ```text
- .env.example                        |   9 ++
- .gitignore                          |  42 +++++-
- device.env.example                  |   5 +
- docs/WORKFLOW.md                    |  45 ++++++
- docs/requirements/REQ-0002.md       |  29 ++++
- tools/security/check_public_repo.py | 275 ++++++++++++++++++++++++++++++++++++
- 6 files changed, 404 insertions(+), 1 deletion(-)
+39 files changed, 2334 insertions(+)
 ```
 
-比较范围：`908a18459983ef9072e863835404c1ad2eae3ce1..3fe0b734699111857d3ef74acf97898242a3845a`。完整差异见 `codex/handoff/LATEST.patch`。
-
-## 修改了哪些安全规则
-
-- Secret、设备、网络、签名、日志、截图和诊断原始数据只允许保存在本地私有目录。
-- 长期凭据优先使用 macOS Keychain；代码通过统一配置层读取，不得硬编码或写入日志。
-- 提交前扫描工作区、暂存区、历史文件和提交信息；命中时阻止提交且不回显值。
-- 完整日志和错误截图默认不入库；公开诊断信息必须脱敏。
-
-## `.gitignore` 增加了什么
-
-- 本地 env、Secret、凭据、SSH/签名材料。
-- `diagnostics/private/`、`logs/private/`、`errors/private/`、`screenshots/private/`。
-- ADB、设备 dump、UIAutomator、logcat、crash dump 和 tombstone。
-- Python 虚拟环境/缓存以及 Android 构建产物。
-
-## 本地敏感目录
-
-`~/.config/yishijieyongzhe/`
-
-根目录及 `private/` 子目录权限已验证为 `700`；已有顶层 env 文件权限检查无不合规项。未读取或输出任何本地 Secret 内容。
+比较范围：`c8b942f..799c044380766dbb13a234665d919fc842136bed`。完整差异见 `codex/handoff/LATEST.patch`。
 
 ## 关键代码改动说明
 
-新增 `tools/security/check_public_repo.py`。该工具不依赖第三方库，检测凭据赋值、常见 Token、私钥头、Bearer、私有 IP、MAC、真实本机用户路径、设备配置以及敏感文件路径。
+- `AutomationStateMachine` 将 `STOP` 和 `Fail` 设计为全状态安全终止，`RUNNING_PLACEHOLDER` 不连接任何游戏手势。
+- `GameAccessibilityService` 仅暴露窗口/前台/手势能力；业务 UI 未调用手势接口。已启用状态采用服务连接、系统管理器和安全设置三重校验。
+- `MediaProjectionCaptureService` 获得授权后只抓取一帧并释放资源。
+- `AppDatabase` 使用 Room/KSP，包含五个 M0 实体和 DailyExecution 唯一约束。
+- `Pad Inspector` 强制单设备，报告仅存本机私有目录，窗口边界从系统已确认来源读取。
 
 ## 测试结果
 
-- 扫描器自测：通过。
-- 实现提交后的当前/暂存及完整历史扫描：通过。
-- 合成假凭据阻断和不回显测试：通过。
-- ignore 规则边界测试：通过。
-- Python 编译与 Git whitespace 检查：源文件通过；标准补丁文件已单独验证与原始 `git diff` 逐字一致。
-- Android 构建/ADB 真机测试：不适用，当前无应用工程。
-
-## 是否发现历史敏感信息
-
-在扫描器覆盖的规则范围内，未发现真实 Token、密码、私钥、keystore、设备信息、原始日志、敏感截图或未脱敏诊断数据。
-
-Git 历史包含正常的作者邮箱元数据；其值未在本报告中输出。它不是认证凭据，但可能构成用户希望隐藏的个人信息。
-
-## 是否需要立即撤销 Token
-
-否。没有证据表明真实 Token 或其他认证 Secret 曾进入当前 Git 历史。
-
-## Security scan 是否通过
-
-通过。实现提交后结果：28 个当前/暂存文本候选、34 个历史文本对象，0 个二进制或超大对象被跳过。
-
-## Push 是否成功
-
-成功。安全改造实现提交和交接元数据均已推送至 Gitee `origin/master`。
+- Debug 构建与 4 项 Kotlin 单元测试：通过。
+- 1 项 Room 仪器测试：通过。
+- 4 项 Pad Inspector 测试：通过。
+- 无线 Pad：APK 启动、无障碍状态、MediaProjection 允许路径和 3 个真实窗口样本通过；截图仅共享助手自身。
+- 公开仓库安全扫描：通过（当前/索引 76 个文本候选，历史 53 个文本 blob，跳过 1 个二进制或超大对象）。
 
 ## 错误信息
 
-初次自测发现示例 IP 和扫描器自测源码的误报，已收紧占位符识别并改为动态生成测试数据。修正后全部检查通过。
+- Android SDK 命令行工具报告 SDK XML 版本提示，未阻塞构建或测试。
+- Pad 中文输入法会改写 shell 注入的点号，导致自动填充的包名被本机格式校验拒绝；未绕过该校验。
+- 多实例 Pad 会显示系统实例选择器；测试只选择助手实例。
 
 ## 尚未解决的问题
 
-- 是否隐藏既有 Git 作者邮箱，需要用户在公开仓库前确认；如需处理，应先配置公开安全的 Git 身份，再经确认重写历史并强制推送。
-- 二进制截图仍必须人工复核，文本扫描器不能替代视觉脱敏检查。
+- 尚未实现任何游戏页面识别、坐标、模板/OCR、战斗或副本逻辑。
+- 目标包名继续只保留在本机 app 配置/私有报告，不应提交或写入公开 review。
 
 ## 希望 ChatGPT 重点审查的内容
 
-- Secret 检测规则与占位符白名单是否平衡误报和漏报。
-- Git 作者邮箱是否允许随公开仓库一起公开。
-- macOS Keychain → 本地 env 的后续配置读取层设计。
-- 二进制截图人工复核流程是否需要增加固定清单或审批记录。
+- 状态机从 `READY` 到 `RUNNING_PLACEHOLDER` 的权限/窗口门禁是否足够保守。
+- 无障碍服务的能力接口是否应在后续需求进一步缩小，避免误用手势。
+- Room 的字段、唯一约束和未来迁移策略是否满足数据模型文档。
+- MediaProjection 单帧生命周期、私有报告边界和三窗口适配策略。
