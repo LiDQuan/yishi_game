@@ -93,4 +93,3 @@ git diff <上一已验收commit>..<当前commit>
 - Token、密码、Gitee PAT、签名文件、`local.properties`、环境变量文件及其他凭据禁止提交。
 - 提交前检查 `git status`、暂存区差异和敏感信息。
 - 诊断数据提交前必须确认不含账号、设备标识、凭据和其他隐私信息。
-
