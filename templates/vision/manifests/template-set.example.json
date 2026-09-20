@@ -8,7 +8,7 @@
       "pageId": "EXAMPLE",
       "roi": {"left": 0.7, "top": 0.8, "right": 0.95, "bottom": 0.95},
       "threshold": 0.9,
-      "scalePolicy": "FIXED_OR_LIMITED",
+      "scalePolicy": "FIXED",
       "negative": false,
       "asset": "private://page.example.anchor.png"
     }

@@ -9,11 +9,27 @@ import com.lidquan.yishigame.vision.ocr.freeAttemptState
 import com.lidquan.yishigame.vision.page.PageDefinition
 import com.lidquan.yishigame.vision.page.PageDetector
 import com.lidquan.yishigame.vision.page.SignalRule
+import com.lidquan.yishigame.vision.template.RgbaTemplate
+import com.lidquan.yishigame.vision.template.TemplateDefinition
+import com.lidquan.yishigame.vision.template.TemplateMatcher
 
 data class OcrSignalDefinition(
     val id: String,
     val roi: NormalizedRect,
     val expectedText: String,
+)
+
+enum class SemanticOcrSignalType { FREE_ATTEMPT }
+
+data class SemanticOcrSignalDefinition(
+    val id: String,
+    val roi: NormalizedRect,
+    val type: SemanticOcrSignalType,
+)
+
+data class TemplateSignalDefinition(
+    val definition: TemplateDefinition,
+    val template: RgbaTemplate,
 )
 
 data class VisionConfiguration(
@@ -22,6 +38,8 @@ data class VisionConfiguration(
     val pageDefinitionVersion: String,
     val ocrSignals: List<OcrSignalDefinition>,
     val pages: List<PageDefinition>,
+    val semanticOcrSignals: List<SemanticOcrSignalDefinition> = emptyList(),
+    val templateSignals: List<TemplateSignalDefinition> = emptyList(),
 )
 
 class ConfiguredVisionEngine(
@@ -48,6 +66,18 @@ class ConfiguredVisionEngine(
             } else {
                 null
             }
+        }.toMutableList<VisionEvidence>()
+        configuration.semanticOcrSignals.forEach { signal ->
+            val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
+            val started = System.nanoTime()
+            rawOcr += runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+            ocrNanos += System.nanoTime() - started
+        }
+        var templateNanos = 0L
+        configuration.templateSignals.forEach { signal ->
+            val started = System.nanoTime()
+            TemplateMatcher.match(signal.definition, frame, currentViewport, signal.template)?.let(evidence::add)
+            templateNanos += System.nanoTime() - started
         }
         val freeState = freeAttemptState(rawOcr)
         val detectorStarted = System.nanoTime()
@@ -56,6 +86,7 @@ class ConfiguredVisionEngine(
         return VisionAnalysis(
             detection = detection,
             freeAttemptState = freeState,
+            templateDurationMs = templateNanos / 1_000_000L,
             ocrDurationMs = ocrNanos / 1_000_000L,
             pageDetectorDurationMs = detectorMs,
         )

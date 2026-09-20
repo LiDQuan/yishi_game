@@ -12,9 +12,20 @@ import org.junit.Test
 
 class ActionGuardTest {
     private val safe = ActionContext(
-        AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
-        WindowGate.MATCHED, true, StablePage("DUNGEON_DETAIL", .96f, 1, 1), setOf("DUNGEON_DETAIL"),
-        WindowBounds(10, 10, 20, 20), setOf("LOADING"), FreeAttemptState.AVAILABLE,
+        automationState = AutomationState.RUNNING_PLACEHOLDER,
+        accessibilityConnected = true,
+        captureState = ScreenCaptureState.Active(1, 1, 1),
+        targetVisible = true,
+        targetActive = true,
+        windowGate = WindowGate.MATCHED,
+        viewportValid = true,
+        stablePage = StablePage("DUNGEON_DETAIL", .96f, 1_000, 1),
+        currentViewportVersion = 1,
+        now = 1_500,
+        allowedPages = setOf("DUNGEON_DETAIL"),
+        targetRect = WindowBounds(10, 10, 20, 20),
+        expectedPagesAfter = setOf("LOADING"),
+        freeAttemptState = FreeAttemptState.AVAILABLE,
     )
 
     @Test fun `guard only allows dry run when every gate is confirmed`() {
@@ -29,5 +40,11 @@ class ActionGuardTest {
     @Test fun `forbidden auto is always denied`() {
         val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE, riskLevel = RiskLevel.FORBIDDEN_AUTO), safe) as GuardDecision.Deny
         assertEquals(GuardDenyReason.FORBIDDEN_AUTO, decision.reason)
+    }
+
+    @Test fun `stale or mismatched page is denied`() {
+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
+        assertEquals(GuardDenyReason.PAGE_VIEWPORT_MISMATCH, (ActionGuard.plan(intent, safe.copy(currentViewportVersion = 2)) as GuardDecision.Deny).reason)
+        assertEquals(GuardDenyReason.PAGE_STALE, (ActionGuard.plan(intent, safe.copy(now = 4_000)) as GuardDecision.Deny).reason)
     }
 }

@@ -11,6 +11,17 @@ data class NormalizedRect(val left: Float, val top: Float, val right: Float, val
 
 data class ScreenPoint(val x: Int, val y: Int)
 
+data class WindowGeometry(
+    val windowBounds: WindowBounds,
+    val contentViewport: WindowBounds,
+    val profileVersion: Long,
+) {
+    val isConfirmed: Boolean get() =
+        profileVersion > 0 && windowBounds.isValid && contentViewport.isValid &&
+            contentViewport.left >= windowBounds.left && contentViewport.top >= windowBounds.top &&
+            contentViewport.right <= windowBounds.right && contentViewport.bottom <= windowBounds.bottom
+}
+
 object ViewportMapper {
     fun toScreen(rect: NormalizedRect, viewport: WindowBounds): WindowBounds {
         require(viewport.isValid)

@@ -33,6 +33,7 @@ import com.lidquan.yishigame.vision.VisionMetrics
 import com.lidquan.yishigame.vision.VisionWorker
 import com.lidquan.yishigame.vision.ConfiguredVisionEngine
 import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
+import com.lidquan.yishigame.viewport.WindowGeometry
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,6 +53,7 @@ data class EnvironmentUiState(
     val targetVisible: Boolean = false,
     val targetActive: Boolean = false,
     val windowBounds: WindowBounds? = null,
+    val contentViewport: WindowBounds? = null,
     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
     val deviceSummary: String = "",
     val recentEvents: List<DiagnosticEvent> = emptyList(),
@@ -80,10 +82,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val captureController: ScreenCaptureController = MediaProjectionScreenCaptureController(appContext)
     private val visionEngine = ConfiguredVisionEngine(
         ocr = MlKitChineseOcrEngine(),
-        viewport = { mutableUiState.value.windowBounds ?: lastKnownVisionViewport() },
+        viewport = { confirmedGeometry(mutableUiState.value.windowBounds)?.contentViewport },
     )
     private val visionWorker = VisionWorker(captureController.frameStore, analyze = visionEngine::analyze)
     private var targetActivationTimeout: Job? = null
+    private var lastCaptureActive = false
+    private var lastVisionPackage = ""
+    private var lastVisionGate: WindowGate? = null
     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
 
@@ -116,6 +121,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.edit().putString(targetPackageKey, config.packageName.orEmpty()).apply()
         record("TARGET_CONFIG", if (config.packageName == null) "INVALID_OR_EMPTY" else "SAVED")
         windowMonitor.clear()
+        clearContentViewportProfile()
+        visionWorker.invalidate()
         refresh()
     }
 
@@ -136,6 +143,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
             return
         }
+        acceptContentViewportProfile(snapshot.windowBounds, snapshot.windowBounds)
+        visionWorker.invalidate()
         stateMachine.dispatch(AutomationEvent.DeviceReady)
         stateMachine.dispatch(AutomationEvent.CheckWindow)
         stateMachine.dispatch(AutomationEvent.WindowVerified)
@@ -190,10 +199,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
-    fun evaluateOpenSettingsDryRun() {
+    fun evaluateDungeonAnchorDryRun() {
         val state = mutableUiState.value
-        val decision = ActionGuard.plan(
-            ActionIntent(ActionType.OPEN_SETTINGS, riskLevel = RiskLevel.SAFE),
+        val decision = dungeonAnchorDryRun(state)
+        mutableUiState.value = state.copy(dryRunDecision = decision)
+        record("ACTION_GUARD_DRY_RUN", if (decision is GuardDecision.AllowDryRun) "ALLOW_DRY_RUN" else "DENY")
+    }
+
+    private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
+        ActionGuard.plan(
+            ActionIntent(ActionType.OPEN_DUNGEON, targetId = "dungeon.anchor", riskLevel = RiskLevel.NORMAL),
             ActionContext(
                 automationState = state.automationState,
                 accessibilityConnected = state.accessibilityEnabled,
@@ -201,16 +216,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetVisible = state.targetVisible,
                 targetActive = state.targetActive,
                 windowGate = state.windowGate,
-                viewportValid = state.windowBounds?.isValid == true,
+                viewportValid = state.contentViewport?.isValid == true,
                 stablePage = state.visionMetrics.stablePage,
-                allowedPages = setOf("MAIN"),
-                targetRect = null,
-                expectedPagesAfter = setOf("SETTINGS"),
+                currentViewportVersion = windowMonitor.version,
+                now = System.currentTimeMillis(),
+                allowedPages = setOf("DUNGEON_LIST"),
+                targetRect = state.visionMetrics.stablePage?.anchors?.get("dungeon.anchor"),
+                expectedPagesAfter = setOf("DUNGEON_LIST"),
             ),
         )
-        mutableUiState.value = state.copy(dryRunDecision = decision)
-        record("ACTION_GUARD_DRY_RUN", if (decision is GuardDecision.AllowDryRun) "ALLOW_DRY_RUN" else "DENY")
-    }
 
     private fun refresh() {
         val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
@@ -223,11 +237,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             ?.maxByOrNull { it.layer }
         val targetVisible = targetWindow != null
-        targetWindow?.bounds?.takeIf { it.isValid }?.let(::rememberVisionViewport)
         val targetActive = targetWindow?.let { it.isActive || it.isFocused } ?: false
         val gate = windowMonitor.observe(targetWindow?.bounds)
         val currentState = stateMachine.state.value
         val captureActive = captureController.state.value is ScreenCaptureState.Active
+        if (
+            captureActive != lastCaptureActive ||
+            configuredPackage != lastVisionPackage ||
+            (gate != lastVisionGate && gate != WindowGate.MATCHED)
+        ) {
+            visionWorker.invalidate()
+        }
+        lastCaptureActive = captureActive
+        lastVisionPackage = configuredPackage
+        lastVisionGate = gate
         val accessibilityEnabled = GameAccessibilityService.connected.value
         val handshakeStates = setOf(
             AutomationState.WAIT_TARGET_ACTIVE,
@@ -258,7 +281,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val priorInput = mutableUiState.value.targetPackageInput
-        mutableUiState.value = EnvironmentUiState(
+        val refreshed = EnvironmentUiState(
             automationState = stateMachine.state.value,
             recoveryRequirement = stateMachine.recoveryRequirement,
             accessibilityEnabled = accessibilityEnabled,
@@ -270,10 +293,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             targetVisible = targetVisible,
             targetActive = targetActive,
             windowBounds = targetWindow?.bounds,
+            contentViewport = confirmedGeometry(targetWindow?.bounds)?.contentViewport,
             windowGate = gate,
             deviceSummary = deviceSummary(),
             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
         )
+        mutableUiState.value = refreshed.copy(dryRunDecision = dungeonAnchorDryRun(refreshed))
     }
 
     private fun record(eventType: String, result: String, errorCode: String? = null) {
@@ -290,31 +315,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun deviceSummary(): String = "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}"
 
-    private fun rememberVisionViewport(bounds: WindowBounds) {
+    private fun acceptContentViewportProfile(window: WindowBounds, content: WindowBounds) {
         preferences.edit()
-            .putInt(visionViewportLeftKey, bounds.left)
-            .putInt(visionViewportTopKey, bounds.top)
-            .putInt(visionViewportRightKey, bounds.right)
-            .putInt(visionViewportBottomKey, bounds.bottom)
+            .putInt(profileWindowLeftKey, window.left)
+            .putInt(profileWindowTopKey, window.top)
+            .putInt(profileWindowRightKey, window.right)
+            .putInt(profileWindowBottomKey, window.bottom)
+            .putInt(contentViewportLeftKey, content.left)
+            .putInt(contentViewportTopKey, content.top)
+            .putInt(contentViewportRightKey, content.right)
+            .putInt(contentViewportBottomKey, content.bottom)
+            .putLong(contentViewportProfileVersionKey, windowMonitor.version)
             .apply()
     }
 
-    private fun lastKnownVisionViewport(): WindowBounds? {
-        if (!preferences.contains(visionViewportRightKey)) return null
-        return WindowBounds(
-            preferences.getInt(visionViewportLeftKey, 0),
-            preferences.getInt(visionViewportTopKey, 0),
-            preferences.getInt(visionViewportRightKey, 0),
-            preferences.getInt(visionViewportBottomKey, 0),
-        ).takeIf { it.isValid }
+    private fun confirmedGeometry(currentWindow: WindowBounds?): WindowGeometry? {
+        if (currentWindow == null || !preferences.contains(contentViewportProfileVersionKey)) return null
+        val profileWindow = WindowBounds(
+            preferences.getInt(profileWindowLeftKey, 0), preferences.getInt(profileWindowTopKey, 0),
+            preferences.getInt(profileWindowRightKey, 0), preferences.getInt(profileWindowBottomKey, 0),
+        )
+        val geometry = WindowGeometry(
+            windowBounds = profileWindow,
+            contentViewport = WindowBounds(
+                preferences.getInt(contentViewportLeftKey, 0), preferences.getInt(contentViewportTopKey, 0),
+                preferences.getInt(contentViewportRightKey, 0), preferences.getInt(contentViewportBottomKey, 0),
+            ),
+            profileVersion = preferences.getLong(contentViewportProfileVersionKey, 0),
+        )
+        return geometry.takeIf { it.isConfirmed && it.windowBounds == currentWindow }
+    }
+
+    private fun clearContentViewportProfile() {
+        preferences.edit().remove(contentViewportProfileVersionKey).apply()
     }
 
     companion object {
         private const val targetPackageKey = "target_game_package"
         private const val targetActivationTimeoutMillis = 30_000L
-        private const val visionViewportLeftKey = "vision_viewport_left"
-        private const val visionViewportTopKey = "vision_viewport_top"
-        private const val visionViewportRightKey = "vision_viewport_right"
-        private const val visionViewportBottomKey = "vision_viewport_bottom"
+        private const val profileWindowLeftKey = "profile_window_left"
+        private const val profileWindowTopKey = "profile_window_top"
+        private const val profileWindowRightKey = "profile_window_right"
+        private const val profileWindowBottomKey = "profile_window_bottom"
+        private const val contentViewportLeftKey = "content_viewport_left"
+        private const val contentViewportTopKey = "content_viewport_top"
+        private const val contentViewportRightKey = "content_viewport_right"
+        private const val contentViewportBottomKey = "content_viewport_bottom"
+        private const val contentViewportProfileVersionKey = "content_viewport_profile_version"
     }
 }

@@ -116,8 +116,8 @@ fun AssistantApp(
                     StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
                     StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
                     StatusRow("Action Guard", guardLabel(state.dryRunDecision))
-                    Button(onClick = viewModel::evaluateOpenSettingsDryRun, modifier = Modifier.fillMaxWidth()) {
-                        Text("评估 OPEN_SETTINGS Dry-Run")
+                    Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
+                        Text("评估 DUNGEON_LIST 锚点 Dry-Run")
                     }
                     Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
                 }

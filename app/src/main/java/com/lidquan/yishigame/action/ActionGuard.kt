@@ -10,7 +10,7 @@ import com.lidquan.yishigame.vision.StablePage
 
 enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
 enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
-enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
+enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
 
 data class ActionIntent(val type: ActionType, val targetId: String? = null, val riskLevel: RiskLevel)
 data class ActionPlan(
@@ -31,6 +31,9 @@ data class ActionContext(
     val windowGate: WindowGate,
     val viewportValid: Boolean,
     val stablePage: StablePage?,
+    val currentViewportVersion: Long,
+    val now: Long,
+    val maxStablePageAgeMs: Long = 2_000L,
     val allowedPages: Set<String>,
     val targetRect: WindowBounds?,
     val expectedPagesAfter: Set<String>,
@@ -56,6 +59,8 @@ object ActionGuard {
         if (context.windowGate != WindowGate.MATCHED) return deny(GuardDenyReason.WINDOW_NOT_MATCHED)
         if (!context.viewportValid) return deny(GuardDenyReason.VIEWPORT_INVALID)
         val page = context.stablePage ?: return deny(GuardDenyReason.PAGE_NOT_STABLE)
+        if (page.viewportVersion != context.currentViewportVersion) return deny(GuardDenyReason.PAGE_VIEWPORT_MISMATCH)
+        if (context.now < page.observedAt || context.now - page.observedAt > context.maxStablePageAgeMs) return deny(GuardDenyReason.PAGE_STALE)
         if (page.pageId !in context.allowedPages) return deny(GuardDenyReason.PAGE_NOT_ALLOWED)
         val rect = context.targetRect ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
         if (context.expectedPagesAfter.isEmpty()) return deny(GuardDenyReason.POSTCONDITION_MISSING)

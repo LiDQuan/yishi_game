@@ -3,6 +3,7 @@ package com.lidquan.yishigame.vision.template
 import com.lidquan.yishigame.automation.WindowBounds
 import com.lidquan.yishigame.capture.ScreenFrameSnapshot
 import com.lidquan.yishigame.viewport.NormalizedRect
+import com.lidquan.yishigame.viewport.ViewportMapper
 import com.lidquan.yishigame.vision.TemplateEvidence
 
 data class TemplateDefinition(
@@ -12,11 +13,26 @@ data class TemplateDefinition(
     val roi: NormalizedRect,
     val threshold: Float,
     val negative: Boolean = false,
+    val scalePolicy: ScalePolicy = ScalePolicy.FIXED,
 )
+
+enum class ScalePolicy { FIXED }
 
 data class RgbaTemplate(val width: Int, val height: Int, val rgba: ByteArray)
 
 object TemplateMatcher {
+    fun match(
+        definition: TemplateDefinition,
+        frame: ScreenFrameSnapshot,
+        viewport: WindowBounds,
+        template: RgbaTemplate,
+    ): TemplateEvidence? {
+        require(definition.scalePolicy == ScalePolicy.FIXED)
+        val rect = ViewportMapper.toScreen(definition.roi, viewport)
+        val evidence = compare(definition.id, crop(frame, rect), template, rect) ?: return null
+        return evidence.takeIf { it.confidence >= definition.threshold }
+    }
+
     fun compare(id: String, candidate: RgbaTemplate, template: RgbaTemplate, rect: WindowBounds): TemplateEvidence? {
         if (candidate.width != template.width || candidate.height != template.height || candidate.rgba.size != template.rgba.size) return null
         if (candidate.rgba.isEmpty()) return null

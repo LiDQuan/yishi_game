@@ -39,6 +39,7 @@ data class StablePage(
     val confidence: Float,
     val observedAt: Long,
     val viewportVersion: Long,
+    val anchors: Map<String, WindowBounds> = emptyMap(),
 )
 
 data class VisionMetrics(

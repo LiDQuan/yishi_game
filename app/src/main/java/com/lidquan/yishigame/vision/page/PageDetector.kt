@@ -60,10 +60,16 @@ class StablePageTracker(private val windowSize: Int = 3, private val requiredMat
         }
         history.addLast(detection)
         while (history.size > windowSize) history.removeFirst()
-        val matches = history.filterIsInstance<PageDetection.Matched>()
-        val group = matches.groupBy { it.pageId }.maxByOrNull { it.value.size } ?: return null
-        if (group.value.size < requiredMatches) return null
-        return StablePage(group.key, group.value.map { it.confidence }.average().toFloat(), observedAt, viewportVersion)
+        val latest = history.lastOrNull() as? PageDetection.Matched ?: return null
+        val samePage = history.filterIsInstance<PageDetection.Matched>().filter { it.pageId == latest.pageId }
+        if (samePage.size < requiredMatches) return null
+        return StablePage(
+            latest.pageId,
+            samePage.map { it.confidence }.average().toFloat(),
+            observedAt,
+            viewportVersion,
+            latest.evidences.associate { it.id to it.rect },
+        )
     }
 
     fun clear() {

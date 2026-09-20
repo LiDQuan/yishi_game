@@ -30,4 +30,19 @@ class PageDetectorTest {
         assertEquals("MAIN", tracker.add(match, 1, 2)?.pageId)
         assertNull(tracker.add(match, 2, 3))
     }
+
+    @Test fun `latest unknown ambiguous or different page is never actionable`() {
+        val main = PageDetection.Matched("MAIN", .95f, emptyList())
+        val other = PageDetection.Matched("OTHER", .95f, emptyList())
+        listOf<PageDetection>(
+            PageDetection.Unknown(emptyList()),
+            PageDetection.Ambiguous(emptyList()),
+            other,
+        ).forEach { latest ->
+            val tracker = StablePageTracker(3, 2)
+            tracker.add(main, 1, 1)
+            tracker.add(main, 1, 2)
+            assertNull(tracker.add(latest, 1, 3))
+        }
+    }
 }

@@ -56,7 +56,7 @@ def crop(args: argparse.Namespace) -> None:
         "pageId": args.page_id,
         "roi": dict(zip(("left", "top", "right", "bottom"), args.roi)),
         "threshold": args.threshold,
-        "scalePolicy": "FIXED_OR_LIMITED",
+        "scalePolicy": "FIXED",
         "negative": args.negative,
         "asset": asset.name,
         "privacyReview": "PENDING",

@@ -97,7 +97,7 @@ def placeholder(value: str) -> bool:
         return True
     if upper.startswith(("YOUR_", "EXAMPLE", "REDACTED", "CHANGE_ME", "CHANGEME", "PLACEHOLDER", "NOT_SET")):
         return True
-    if upper in {"NONE", "NULL", "N/A"} or set(upper) <= {"X", "_", "-"}:
+    if upper in {"NONE", "NULL", "N/A", "LONG", "STRING", "INT", "BOOLEAN", "FLOAT", "DOUBLE"} or set(upper) <= {"X", "_", "-"}:
         return True
     if re.fullmatch(r"(?:\d{1,3}\.){2,3}x(?:\.x)*", value, re.IGNORECASE):
         return True
