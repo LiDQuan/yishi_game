@@ -30,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lidquan.yishigame.EnvironmentUiState
 import com.lidquan.yishigame.MainViewModel
+import com.lidquan.yishigame.automation.AutomationState
+import com.lidquan.yishigame.automation.RecoveryRequirement
 import com.lidquan.yishigame.capture.ScreenCaptureState
 
 @Composable
@@ -104,7 +106,14 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
             StatusRow("屏幕采集", captureLabel(state.captureState))
             StatusRow("最新帧", state.latestFrameBytes.takeIf { it > 0 }?.let { "$it 字节" } ?: "无")
-            StatusRow("目标游戏", if (state.targetDetected) "前台已识别" else "未识别")
+            StatusRow(
+                "目标游戏",
+                when {
+                    state.targetActive -> "可见 · 前台已激活"
+                    state.targetVisible -> "可见 · 请切回游戏"
+                    else -> "未识别"
+                },
+            )
             StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowGate}" } ?: state.windowGate.name)
             StatusRow("设备摘要", state.deviceSummary)
         }
@@ -140,9 +149,24 @@ private fun Controls(
             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
             Button(
                 onClick = viewModel::beginPlaceholder,
-                enabled = state.canBeginPlaceholder,
+                enabled = state.canArmPlaceholder,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("开始自动化（M0 占位）") }
+            ) { Text("准备启动（M0 占位）") }
+            if (state.automationState == AutomationState.WAIT_TARGET_ACTIVE) {
+                Text("握手第 2 阶段：请切回游戏窗口；只有窗口、焦点和采集状态均通过检查后才会继续。", color = MaterialTheme.colorScheme.primary)
+            }
+            if (state.automationState == AutomationState.PAUSED) {
+                if (state.recoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION) {
+                    Text("已暂停。恢复必须由你显式发起，然后再切回游戏完成安全握手。")
+                    Button(
+                        onClick = viewModel::requestResumePlaceholder,
+                        enabled = state.canRequestResume,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("显式恢复并重新握手") }
+                } else {
+                    Text("窗口、采集或辅助功能环境发生变化，不能直接恢复；处理后请重新执行环境检查。")
+                }
+            }
             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
         }

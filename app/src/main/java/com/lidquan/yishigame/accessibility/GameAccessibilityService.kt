@@ -2,8 +2,10 @@ package com.lidquan.yishigame.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,20 +13,34 @@ import kotlinx.coroutines.flow.asStateFlow
 import com.lidquan.yishigame.automation.WindowBounds
 
 class GameAccessibilityService : AccessibilityService(), AccessibilityController {
+    private val windowPackages = mutableMapOf<Int, String>()
+
     override fun onServiceConnected() {
+        super.onServiceConnected()
         instance = this
         mutableConnected.value = true
+        Log.i(logTag, "service connected")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.packageName?.toString()?.let { mutableLastEventPackage.value = it }
+        val packageName = event?.packageName?.toString() ?: return
+        mutableLastEventPackage.value = packageName
+        if (event.windowId >= 0) windowPackages[event.windowId] = packageName
     }
 
     override fun onInterrupt() = Unit
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (instance === this) instance = null
+        mutableConnected.value = false
+        Log.i(logTag, "service unbound")
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         if (instance === this) instance = null
         mutableConnected.value = false
+        windowPackages.clear()
         super.onDestroy()
     }
 
@@ -54,7 +70,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
     override fun queryWindows(): List<AccessibleWindow> = windows.mapNotNull { window ->
         val rect = Rect()
         window.getBoundsInScreen(rect)
-        val packageName = window.root?.packageName?.toString()
+        val packageName = window.root?.packageName?.toString() ?: windowPackages[window.id]
         if (rect.isEmpty) null else AccessibleWindow(
             packageName = packageName,
             bounds = WindowBounds(rect.left, rect.top, rect.right, rect.bottom),
@@ -68,6 +84,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
     override fun activeWindowPackage(): String? = rootInActiveWindow?.packageName?.toString()
 
     companion object {
+        private const val logTag = "YishiAccessibility"
         @Volatile
         var instance: GameAccessibilityService? = null
             private set

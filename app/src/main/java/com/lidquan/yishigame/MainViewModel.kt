@@ -1,17 +1,16 @@
 package com.lidquan.yishigame
 
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.Application
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lidquan.yishigame.accessibility.GameAccessibilityService
 import com.lidquan.yishigame.automation.AutomationEvent
+import com.lidquan.yishigame.automation.EnvironmentChangeReason
+import com.lidquan.yishigame.automation.RecoveryRequirement
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.AutomationStateMachine
 import com.lidquan.yishigame.automation.WindowBounds
@@ -26,25 +25,37 @@ import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class EnvironmentUiState(
     val automationState: AutomationState = AutomationState.IDLE,
+    val recoveryRequirement: RecoveryRequirement = RecoveryRequirement.NONE,
     val accessibilityEnabled: Boolean = false,
     val captureState: ScreenCaptureState = ScreenCaptureState.NotRequested,
     val latestFrameBytes: Int = 0,
     val targetPackageInput: String = "",
-    val targetDetected: Boolean = false,
+    val targetVisible: Boolean = false,
+    val targetActive: Boolean = false,
     val windowBounds: WindowBounds? = null,
     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
     val deviceSummary: String = "",
     val recentEvents: List<DiagnosticEvent> = emptyList(),
 ) {
-    val canBeginPlaceholder: Boolean get() =
+    val canArmPlaceholder: Boolean get() =
         automationState == AutomationState.READY &&
             accessibilityEnabled &&
             captureState is ScreenCaptureState.Active &&
-            targetDetected &&
+            targetVisible &&
+            windowGate == WindowGate.MATCHED
+
+    val canRequestResume: Boolean get() =
+        automationState == AutomationState.PAUSED &&
+            recoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION &&
+            accessibilityEnabled &&
+            captureState is ScreenCaptureState.Active &&
+            targetVisible &&
             windowGate == WindowGate.MATCHED
 }
 
@@ -54,6 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val stateMachine = AutomationStateMachine()
     private val windowMonitor = WindowMonitor()
     private val captureController: ScreenCaptureController = MediaProjectionScreenCaptureController(appContext)
+    private var targetActivationTimeout: Job? = null
     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
 
@@ -99,7 +111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             record("PRECHECK", "PERMISSION_REQUIRED")
             return
         }
-        if (!snapshot.targetDetected || snapshot.windowBounds == null || windowMonitor.accept(snapshot.windowBounds) != WindowGate.MATCHED) {
+        if (!snapshot.targetVisible || snapshot.windowBounds == null || windowMonitor.accept(snapshot.windowBounds) != WindowGate.MATCHED) {
             stateMachine.dispatch(AutomationEvent.Fail("ENV_TARGET_WINDOW_NOT_READY"))
             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
             return
@@ -112,17 +124,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun beginPlaceholder() {
         refresh()
-        if (!mutableUiState.value.canBeginPlaceholder) {
-            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
+        if (!mutableUiState.value.canArmPlaceholder) {
             record("AUTOMATION_PLACEHOLDER", "BLOCKED", "ENVIRONMENT_CHANGED")
             return
         }
         if (stateMachine.dispatch(AutomationEvent.BeginPlaceholder)) {
-            record("AUTOMATION_PLACEHOLDER", "STARTED")
+            record("AUTOMATION_PLACEHOLDER", "ARMED")
+            scheduleTargetActivationTimeout()
+        }
+    }
+
+    fun requestResumePlaceholder() {
+        refresh()
+        if (!mutableUiState.value.canRequestResume) {
+            record("AUTOMATION_PLACEHOLDER", "RESUME_BLOCKED", "ENVIRONMENT_RECHECK_REQUIRED")
+            return
+        }
+        if (stateMachine.dispatch(AutomationEvent.RequestResume)) {
+            record("AUTOMATION_PLACEHOLDER", "RESUME_ARMED")
+            scheduleTargetActivationTimeout()
+        }
+    }
+
+    private fun scheduleTargetActivationTimeout() {
+        targetActivationTimeout?.cancel()
+        targetActivationTimeout = viewModelScope.launch {
+            delay(targetActivationTimeoutMillis)
+            if (stateMachine.dispatch(AutomationEvent.TargetActivationTimedOut)) {
+                record("AUTOMATION_PLACEHOLDER", "PAUSED", "TARGET_ACTIVATION_TIMEOUT")
+            }
         }
     }
 
     fun stop() {
+        targetActivationTimeout?.cancel()
         stateMachine.dispatch(AutomationEvent.Stop)
         captureController.stop()
         record("STOP", "STOPPED")
@@ -131,49 +166,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refresh() {
         val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
         val service = GameAccessibilityService.instance
-        val activePackage = service?.activeWindowPackage()
         val targetWindow = service
             ?.queryWindows()
-            ?.firstOrNull {
+            ?.filter {
                 configuredPackage.isNotBlank() &&
-                    it.packageName == configuredPackage &&
-                    (it.isActive || it.isFocused)
+                    it.packageName == configuredPackage
             }
-        val targetDetected = configuredPackage.isNotBlank() && activePackage == configuredPackage && targetWindow != null
+            ?.maxByOrNull { it.layer }
+        val targetVisible = targetWindow != null
+        val targetActive = targetWindow?.let { it.isActive || it.isFocused } ?: false
         val gate = windowMonitor.observe(targetWindow?.bounds)
-        if (gate in setOf(WindowGate.CHANGED, WindowGate.UNAVAILABLE) && stateMachine.state.value in setOf(AutomationState.READY, AutomationState.RUNNING_PLACEHOLDER)) {
-            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
-            record("WINDOW_MONITOR", "BLOCKED", "WINDOW_${gate.name}")
+        val currentState = stateMachine.state.value
+        val captureActive = captureController.state.value is ScreenCaptureState.Active
+        val accessibilityEnabled = GameAccessibilityService.connected.value
+        val handshakeStates = setOf(
+            AutomationState.WAIT_TARGET_ACTIVE,
+            AutomationState.RUNNING_PLACEHOLDER,
+            AutomationState.PAUSED,
+        )
+        val environmentChangeReason = when {
+            gate == WindowGate.CHANGED -> EnvironmentChangeReason.WINDOW_CHANGED
+            gate == WindowGate.UNAVAILABLE -> EnvironmentChangeReason.WINDOW_UNAVAILABLE
+            !captureActive -> EnvironmentChangeReason.CAPTURE_INACTIVE
+            !accessibilityEnabled -> EnvironmentChangeReason.ACCESSIBILITY_UNAVAILABLE
+            else -> null
+        }
+        if (
+            environmentChangeReason != null &&
+            (currentState in handshakeStates || currentState == AutomationState.READY)
+        ) {
+            stateMachine.dispatch(AutomationEvent.EnvironmentChanged(environmentChangeReason))
+            record("WINDOW_MONITOR", "BLOCKED", environmentChangeReason.name)
+        } else if (currentState == AutomationState.RUNNING_PLACEHOLDER && !targetActive) {
+            stateMachine.dispatch(AutomationEvent.EnvironmentChanged(EnvironmentChangeReason.TARGET_NOT_ACTIVE))
+            record("WINDOW_MONITOR", "BLOCKED", EnvironmentChangeReason.TARGET_NOT_ACTIVE.name)
+        }
+        if (stateMachine.state.value == AutomationState.WAIT_TARGET_ACTIVE && targetActive && gate == WindowGate.MATCHED && captureActive) {
+            targetActivationTimeout?.cancel()
+            if (stateMachine.dispatch(AutomationEvent.TargetActivated)) {
+                record("AUTOMATION_PLACEHOLDER", "STARTED")
+            }
         }
         val priorInput = mutableUiState.value.targetPackageInput
         mutableUiState.value = EnvironmentUiState(
             automationState = stateMachine.state.value,
-            accessibilityEnabled = isAccessibilityEnabled(),
+            recoveryRequirement = stateMachine.recoveryRequirement,
+            accessibilityEnabled = accessibilityEnabled,
             captureState = captureController.state.value,
             latestFrameBytes = captureController.latestFrame.value?.rgba?.size ?: 0,
             targetPackageInput = priorInput.ifBlank { configuredPackage },
-            targetDetected = targetDetected,
+            targetVisible = targetVisible,
+            targetActive = targetActive,
             windowBounds = targetWindow?.bounds,
             windowGate = gate,
             deviceSummary = deviceSummary(),
             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
         )
-    }
-
-    private fun isAccessibilityEnabled(): Boolean {
-        if (GameAccessibilityService.connected.value) return true
-        val expected = ComponentName(appContext, GameAccessibilityService::class.java)
-        val manager = appContext.getSystemService(AccessibilityManager::class.java)
-        val reportedByManager = manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any { service ->
-            val info = service.resolveInfo.serviceInfo
-            ComponentName(info.packageName, info.name) == expected
-        }
-        if (reportedByManager) return true
-        return Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-            ?.split(':')
-            ?.mapNotNull(ComponentName::unflattenFromString)
-            ?.any { it == expected }
-            ?: false
     }
 
     private fun record(eventType: String, result: String, errorCode: String? = null) {
@@ -192,5 +240,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val targetPackageKey = "target_game_package"
+        private const val targetActivationTimeoutMillis = 30_000L
     }
 }
