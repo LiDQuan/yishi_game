@@ -21,7 +21,6 @@ import com.lidquan.yishigame.action.ActionGuard
 import com.lidquan.yishigame.action.ActionIntent
 import com.lidquan.yishigame.action.ActionType
 import com.lidquan.yishigame.action.GuardDecision
-import com.lidquan.yishigame.action.RiskLevel
 import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureState
@@ -189,7 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         targetActivationTimeout?.cancel()
         stateMachine.dispatch(AutomationEvent.Stop)
         captureController.stop()
-        visionWorker.stop()
+        visionWorker.invalidate()
         record("STOP", "STOPPED")
     }
 
@@ -208,7 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
         ActionGuard.plan(
-            ActionIntent(ActionType.OPEN_DUNGEON, targetId = "dungeon.anchor", riskLevel = RiskLevel.NORMAL),
+            ActionIntent(ActionType.OPEN_DUNGEON),
             ActionContext(
                 automationState = state.automationState,
                 accessibilityConnected = state.accessibilityEnabled,
@@ -216,13 +215,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetVisible = state.targetVisible,
                 targetActive = state.targetActive,
                 windowGate = state.windowGate,
-                viewportValid = state.contentViewport?.isValid == true,
+                contentViewport = state.contentViewport,
                 stablePage = state.visionMetrics.stablePage,
                 currentViewportVersion = windowMonitor.version,
                 now = System.currentTimeMillis(),
-                allowedPages = setOf("DUNGEON_LIST"),
-                targetRect = state.visionMetrics.stablePage?.anchors?.get("dungeon.anchor"),
-                expectedPagesAfter = setOf("DUNGEON_LIST"),
+                actionTargets = state.visionMetrics.actionTargets,
             ),
         )
 

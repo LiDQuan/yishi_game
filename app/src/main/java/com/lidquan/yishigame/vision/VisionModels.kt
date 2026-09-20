@@ -24,6 +24,12 @@ data class OcrEvidence(
     override val confidence: Float get() = reportedConfidence ?: 0.5f
 }
 
+data class ActionTargetEvidence(
+    val id: String,
+    val confidence: Float,
+    val rect: WindowBounds,
+)
+
 enum class FreeAttemptState { AVAILABLE, EXHAUSTED, UNKNOWN }
 
 data class PageCandidate(val pageId: String, val confidence: Float, val evidences: List<VisionEvidence>)
@@ -53,4 +59,5 @@ data class VisionMetrics(
     val pageDetection: PageDetection = PageDetection.Unknown(emptyList()),
     val stablePage: StablePage? = null,
     val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
+    val actionTargets: Map<String, WindowBounds> = emptyMap(),
 )

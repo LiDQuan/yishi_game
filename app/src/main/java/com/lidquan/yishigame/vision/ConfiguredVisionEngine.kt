@@ -17,9 +17,10 @@ data class OcrSignalDefinition(
     val id: String,
     val roi: NormalizedRect,
     val expectedText: String,
+    val actionTargetId: String? = null,
 )
 
-enum class SemanticOcrSignalType { FREE_ATTEMPT }
+enum class SemanticOcrSignalType { FREE_ATTEMPT, GENERIC }
 
 data class SemanticOcrSignalDefinition(
     val id: String,
@@ -52,17 +53,21 @@ class ConfiguredVisionEngine(
     suspend fun analyze(frame: ScreenFrameSnapshot): VisionAnalysis {
         val currentViewport = viewport()?.takeIf { it.isValid && it.right <= frame.width && it.bottom <= frame.height }
             ?: return VisionAnalysis(PageDetection.Unknown(emptyList()), FreeAttemptState.UNKNOWN)
-        val rawOcr = mutableListOf<OcrEvidence>()
+        val freeAttemptOcr = mutableListOf<OcrEvidence>()
+        val actionTargets = mutableListOf<ActionTargetEvidence>()
         var ocrNanos = 0L
         val evidence = configuration.ocrSignals.mapNotNull { signal ->
             val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
             val ocrStarted = System.nanoTime()
             val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
             ocrNanos += System.nanoTime() - ocrStarted
-            rawOcr += lines
             val normalized = lines.joinToString(separator = "") { it.normalizedText }
             if (signal.expectedText in normalized) {
-                OcrEvidence(signal.id, normalized, normalized, 0.9f, roi)
+                val matchingLine = lines.firstOrNull { signal.expectedText in it.normalizedText }
+                if (matchingLine != null && signal.actionTargetId != null) {
+                    actionTargets += ActionTargetEvidence(signal.actionTargetId, matchingLine.confidence, matchingLine.rect)
+                }
+                OcrEvidence(signal.id, normalized, normalized, 0.9f, matchingLine?.rect ?: roi)
             } else {
                 null
             }
@@ -70,7 +75,8 @@ class ConfiguredVisionEngine(
         configuration.semanticOcrSignals.forEach { signal ->
             val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
             val started = System.nanoTime()
-            rawOcr += runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+            val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+            if (signal.type == SemanticOcrSignalType.FREE_ATTEMPT) freeAttemptOcr += lines
             ocrNanos += System.nanoTime() - started
         }
         var templateNanos = 0L
@@ -79,7 +85,7 @@ class ConfiguredVisionEngine(
             TemplateMatcher.match(signal.definition, frame, currentViewport, signal.template)?.let(evidence::add)
             templateNanos += System.nanoTime() - started
         }
-        val freeState = freeAttemptState(rawOcr)
+        val freeState = freeAttemptState(freeAttemptOcr)
         val detectorStarted = System.nanoTime()
         val detection = detector.detect(evidence)
         val detectorMs = (System.nanoTime() - detectorStarted) / 1_000_000L
@@ -89,6 +95,7 @@ class ConfiguredVisionEngine(
             templateDurationMs = templateNanos / 1_000_000L,
             ocrDurationMs = ocrNanos / 1_000_000L,
             pageDetectorDurationMs = detectorMs,
+            actionTargets = actionTargets,
         )
     }
 
@@ -104,7 +111,7 @@ fun initialVisionConfiguration(): VisionConfiguration {
         OcrSignalDefinition("character.title", NormalizedRect(0.27f, 0.13f, 0.65f, 0.22f), "选择角色"),
         OcrSignalDefinition("character.anchor", NormalizedRect(0.28f, 0.42f, 0.62f, 0.52f), "进入游戏"),
         OcrSignalDefinition("dungeon.title", NormalizedRect(0.23f, 0.29f, 0.78f, 0.38f), "地下城"),
-        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域"),
+        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域", actionTargetId = "dungeon.switch_region"),
     )
     fun page(id: String, prefix: String) = PageDefinition(
         pageId = id,

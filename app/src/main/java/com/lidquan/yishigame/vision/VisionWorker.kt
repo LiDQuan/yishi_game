@@ -20,6 +20,7 @@ data class VisionAnalysis(
     val templateDurationMs: Long = 0,
     val ocrDurationMs: Long = 0,
     val pageDetectorDurationMs: Long = 0,
+    val actionTargets: List<ActionTargetEvidence> = emptyList(),
 )
 
 class VisionWorker(
@@ -65,6 +66,7 @@ class VisionWorker(
                         pageDetection = result.detection,
                         stablePage = stable,
                         freeAttemptState = result.freeAttemptState,
+                        actionTargets = result.actionTargets.associate { it.id to it.rect },
                     )
                     lastFrameId = frame.frameId
                 }

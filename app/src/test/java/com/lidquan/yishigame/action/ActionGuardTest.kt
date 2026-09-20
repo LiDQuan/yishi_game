@@ -18,33 +18,35 @@ class ActionGuardTest {
         targetVisible = true,
         targetActive = true,
         windowGate = WindowGate.MATCHED,
-        viewportValid = true,
+        contentViewport = WindowBounds(0, 0, 100, 100),
         stablePage = StablePage("DUNGEON_DETAIL", .96f, 1_000, 1),
         currentViewportVersion = 1,
         now = 1_500,
-        allowedPages = setOf("DUNGEON_DETAIL"),
-        targetRect = WindowBounds(10, 10, 20, 20),
-        expectedPagesAfter = setOf("LOADING"),
+        actionTargets = mapOf("dungeon.start_free" to WindowBounds(10, 10, 20, 20)),
         freeAttemptState = FreeAttemptState.AVAILABLE,
     )
 
-    @Test fun `guard only allows dry run when every gate is confirmed`() {
-        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
+    @Test fun `central policy enforces sensitive gates and cannot be weakened by caller`() {
+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE)
+        assertEquals(RiskLevel.SENSITIVE, ActionPolicyRegistry.policy(intent.type)?.riskLevel)
         assertTrue(ActionGuard.plan(intent, safe) is GuardDecision.AllowDryRun)
-        assertEquals(GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, safe.copy(targetActive = false)) as GuardDecision.Deny).reason)
-        assertEquals(GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, safe.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
-        assertEquals(GuardDenyReason.CAPTURE_INACTIVE, (ActionGuard.plan(intent, safe.copy(captureState = ScreenCaptureState.Stopped("test"))) as GuardDecision.Deny).reason)
         assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
+        assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(intent, safe.copy(stablePage = safe.stablePage?.copy(pageId = "SETTINGS"))) as GuardDecision.Deny).reason)
+        assertEquals(setOf("LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
     }
 
-    @Test fun `forbidden auto is always denied`() {
-        val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE, riskLevel = RiskLevel.FORBIDDEN_AUTO), safe) as GuardDecision.Deny
+    @Test fun `forbidden auto is always denied by registry`() {
+        assertEquals(RiskLevel.FORBIDDEN_AUTO, ActionPolicyRegistry.policy(ActionType.PURCHASE)?.riskLevel)
+        val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE), safe) as GuardDecision.Deny
         assertEquals(GuardDenyReason.FORBIDDEN_AUTO, decision.reason)
     }
 
-    @Test fun `stale or mismatched page is denied`() {
-        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
+    @Test fun `stale mismatched missing and outside target are denied`() {
+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE)
         assertEquals(GuardDenyReason.PAGE_VIEWPORT_MISMATCH, (ActionGuard.plan(intent, safe.copy(currentViewportVersion = 2)) as GuardDecision.Deny).reason)
         assertEquals(GuardDenyReason.PAGE_STALE, (ActionGuard.plan(intent, safe.copy(now = 4_000)) as GuardDecision.Deny).reason)
+        assertEquals(GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(actionTargets = emptyMap())) as GuardDecision.Deny).reason)
+        val outside = safe.copy(actionTargets = mapOf("dungeon.start_free" to WindowBounds(90, 90, 110, 110)))
+        assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(intent, outside) as GuardDecision.Deny).reason)
     }
 }

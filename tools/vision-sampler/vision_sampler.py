@@ -57,7 +57,6 @@ def crop(args: argparse.Namespace) -> None:
         "roi": dict(zip(("left", "top", "right", "bottom"), args.roi)),
         "threshold": args.threshold,
         "scalePolicy": "FIXED",
-        "negative": args.negative,
         "asset": asset.name,
         "privacyReview": "PENDING",
     }
@@ -78,7 +77,6 @@ def main() -> None:
     command.add_argument("--page-id", default="UNKNOWN")
     command.add_argument("--threshold", type=float, default=0.90)
     command.add_argument("--template-set-version", type=int, default=1)
-    command.add_argument("--negative", action="store_true")
     command.set_defaults(run=crop)
     args = parser.parse_args()
     if args.viewport is not None and len(args.viewport) != 4:

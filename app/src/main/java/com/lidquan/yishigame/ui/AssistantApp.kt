@@ -117,7 +117,7 @@ fun AssistantApp(
                     StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
                     StatusRow("Action Guard", guardLabel(state.dryRunDecision))
                     Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
-                        Text("评估 DUNGEON_LIST 锚点 Dry-Run")
+                        Text("评估 DUNGEON_LIST 动作目标 Dry-Run")
                     }
                     Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
                 }
@@ -213,7 +213,9 @@ private fun detectionLabel(detection: PageDetection): String = when (detection) 
 
 private fun guardLabel(decision: GuardDecision?): String = when (decision) {
     null -> "未评估"
-    is GuardDecision.AllowDryRun -> "ALLOW_DRY_RUN（不会执行）"
+    is GuardDecision.AllowDryRun -> decision.plan.let {
+        "ALLOW_DRY_RUN（不会执行）· rect=${it.targetRect.left},${it.targetRect.top},${it.targetRect.right},${it.targetRect.bottom} · point=${it.tapPoint.x},${it.tapPoint.y}"
+    }
     is GuardDecision.Deny -> "DENY · ${decision.reason}"
 }
 

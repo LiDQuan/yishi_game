@@ -12,7 +12,6 @@ import com.lidquan.yishigame.action.ActionGuard
 import com.lidquan.yishigame.action.ActionIntent
 import com.lidquan.yishigame.action.ActionType
 import com.lidquan.yishigame.action.GuardDecision
-import com.lidquan.yishigame.action.RiskLevel
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.WindowGate
 import com.lidquan.yishigame.capture.ScreenCaptureState
@@ -53,7 +52,9 @@ class RealVisionFixtureTest {
     }
 
     private fun assertDungeonDryRun(detection: PageDetection.Matched, analysis: VisionAnalysis, viewport: WindowBounds) {
-        val anchor = detection.evidences.first { it.id == "dungeon.anchor" }.rect
+        val target = analysis.actionTargets.single { it.id == "dungeon.switch_region" }.rect
+        assertTrue(target.isValid && target.width < viewport.width && target.height < viewport.height)
+        assertTrue(detection.evidences.none { it.id == "dungeon.switch_region" })
         val stable = StablePage(detection.pageId, detection.confidence, 1_000, 7, detection.evidences.associate { it.id to it.rect })
         val context = ActionContext(
             automationState = AutomationState.RUNNING_PLACEHOLDER,
@@ -62,20 +63,18 @@ class RealVisionFixtureTest {
             targetVisible = true,
             targetActive = true,
             windowGate = WindowGate.MATCHED,
-            viewportValid = viewport.isValid,
+            contentViewport = viewport,
             stablePage = stable,
             currentViewportVersion = 7,
             now = 1_100,
-            allowedPages = setOf("DUNGEON_LIST"),
-            targetRect = anchor,
-            expectedPagesAfter = setOf("DUNGEON_LIST"),
+            actionTargets = analysis.actionTargets.associate { it.id to it.rect },
             freeAttemptState = analysis.freeAttemptState,
         )
-        val intent = ActionIntent(ActionType.OPEN_DUNGEON, "dungeon.anchor", RiskLevel.NORMAL)
+        val intent = ActionIntent(ActionType.OPEN_DUNGEON)
         assertTrue(ActionGuard.plan(intent, context) is GuardDecision.AllowDryRun)
         assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, context.copy(targetActive = false)) as GuardDecision.Deny).reason)
         assertEquals(com.lidquan.yishigame.action.GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, context.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
-        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, context.copy(targetRect = null)) as GuardDecision.Deny).reason)
+        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, context.copy(actionTargets = emptyMap())) as GuardDecision.Deny).reason)
     }
 
     private fun metadata(file: File): WindowBounds {

@@ -26,7 +26,7 @@ class TemplateMatcherTest {
         val frame = ScreenFrameSnapshot(1, 2, 1, 8, 4, 1, byteArrayOf(1, 2, 3, 4, 9, 8, 7, 6))
         val viewport = WindowBounds(0, 0, 2, 1)
         val required = TemplateDefinition("required", 1, "PAGE", NormalizedRect(0f, 0f, .5f, 1f), .99f)
-        val negative = TemplateDefinition("negative", 1, "PAGE", NormalizedRect(.5f, 0f, 1f, 1f), .99f, negative = true)
+        val negative = TemplateDefinition("negative", 1, "PAGE", NormalizedRect(.5f, 0f, 1f, 1f), .99f)
         val requiredEvidence = TemplateMatcher.match(required, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(1, 2, 3, 4)))!!
         val negativeEvidence = TemplateMatcher.match(negative, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(9, 8, 7, 6)))!!
         val detector = PageDetector(listOf(PageDefinition("PAGE", 1, listOf(SignalRule("required", .99f)), negative = listOf(SignalRule("negative", .99f)), threshold = .99f, minimumMargin = .01f)))

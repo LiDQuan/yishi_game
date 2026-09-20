@@ -12,7 +12,6 @@ data class TemplateDefinition(
     val pageId: String,
     val roi: NormalizedRect,
     val threshold: Float,
-    val negative: Boolean = false,
     val scalePolicy: ScalePolicy = ScalePolicy.FIXED,
 )
 
