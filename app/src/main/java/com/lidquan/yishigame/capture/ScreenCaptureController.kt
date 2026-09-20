@@ -27,7 +27,7 @@ sealed interface ScreenCaptureState {
 
 interface ScreenCaptureController {
     val state: StateFlow<ScreenCaptureState>
-    val latestFrame: StateFlow<ScreenFrame?>
+    val frameStore: FrameStore
     fun permissionIntent(): Intent
     fun handlePermissionResult(resultCode: Int, data: Intent?)
     fun stop()
@@ -37,7 +37,7 @@ class MediaProjectionScreenCaptureController(private val context: Context) : Scr
     private val projectionManager = context.getSystemService(MediaProjectionManager::class.java)
 
     override val state: StateFlow<ScreenCaptureState> = MediaProjectionCaptureService.state
-    override val latestFrame: StateFlow<ScreenFrame?> = MediaProjectionCaptureService.latestFrame
+    override val frameStore: FrameStore = MediaProjectionCaptureService.frameStore
 
     override fun permissionIntent(): Intent = projectionManager.createScreenCaptureIntent()
 

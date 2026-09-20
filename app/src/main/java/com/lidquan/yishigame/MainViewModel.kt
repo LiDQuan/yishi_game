@@ -16,12 +16,23 @@ import com.lidquan.yishigame.automation.AutomationStateMachine
 import com.lidquan.yishigame.automation.WindowBounds
 import com.lidquan.yishigame.automation.WindowGate
 import com.lidquan.yishigame.automation.WindowMonitor
+import com.lidquan.yishigame.action.ActionContext
+import com.lidquan.yishigame.action.ActionGuard
+import com.lidquan.yishigame.action.ActionIntent
+import com.lidquan.yishigame.action.ActionType
+import com.lidquan.yishigame.action.GuardDecision
+import com.lidquan.yishigame.action.RiskLevel
 import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureState
+import com.lidquan.yishigame.capture.FrameMetadata
 import com.lidquan.yishigame.config.TargetGameConfig
 import com.lidquan.yishigame.diagnostics.DiagnosticEvent
 import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
+import com.lidquan.yishigame.vision.VisionMetrics
+import com.lidquan.yishigame.vision.VisionWorker
+import com.lidquan.yishigame.vision.ConfiguredVisionEngine
+import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,7 +45,9 @@ data class EnvironmentUiState(
     val recoveryRequirement: RecoveryRequirement = RecoveryRequirement.NONE,
     val accessibilityEnabled: Boolean = false,
     val captureState: ScreenCaptureState = ScreenCaptureState.NotRequested,
-    val latestFrameBytes: Int = 0,
+    val frameMetadata: FrameMetadata = FrameMetadata(),
+    val visionMetrics: VisionMetrics = VisionMetrics(),
+    val dryRunDecision: GuardDecision? = null,
     val targetPackageInput: String = "",
     val targetVisible: Boolean = false,
     val targetActive: Boolean = false,
@@ -65,6 +78,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val stateMachine = AutomationStateMachine()
     private val windowMonitor = WindowMonitor()
     private val captureController: ScreenCaptureController = MediaProjectionScreenCaptureController(appContext)
+    private val visionEngine = ConfiguredVisionEngine(
+        ocr = MlKitChineseOcrEngine(),
+        viewport = { mutableUiState.value.windowBounds ?: lastKnownVisionViewport() },
+    )
+    private val visionWorker = VisionWorker(captureController.frameStore, analyze = visionEngine::analyze)
     private var targetActivationTimeout: Job? = null
     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
@@ -72,11 +90,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch { stateMachine.state.collect { refresh() } }
         viewModelScope.launch { captureController.state.collect { refresh() } }
-        viewModelScope.launch { captureController.latestFrame.collect { refresh() } }
+        viewModelScope.launch { captureController.frameStore.metadata.collect { refresh() } }
+        viewModelScope.launch { visionWorker.metrics.collect { refresh() } }
         viewModelScope.launch { GameAccessibilityService.connected.collect { refresh() } }
         viewModelScope.launch { GameAccessibilityService.lastEventPackage.collect { refresh() } }
         viewModelScope.launch { DiagnosticRecorder.events.collect { refresh() } }
         refresh()
+        visionWorker.start(viewModelScope) { windowMonitor.version }
     }
 
     fun capturePermissionIntent(): Intent = captureController.permissionIntent()
@@ -160,7 +180,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         targetActivationTimeout?.cancel()
         stateMachine.dispatch(AutomationEvent.Stop)
         captureController.stop()
+        visionWorker.stop()
         record("STOP", "STOPPED")
+    }
+
+    override fun onCleared() {
+        visionWorker.stop()
+        visionEngine.close()
+        super.onCleared()
+    }
+
+    fun evaluateOpenSettingsDryRun() {
+        val state = mutableUiState.value
+        val decision = ActionGuard.plan(
+            ActionIntent(ActionType.OPEN_SETTINGS, riskLevel = RiskLevel.SAFE),
+            ActionContext(
+                automationState = state.automationState,
+                accessibilityConnected = state.accessibilityEnabled,
+                captureState = state.captureState,
+                targetVisible = state.targetVisible,
+                targetActive = state.targetActive,
+                windowGate = state.windowGate,
+                viewportValid = state.windowBounds?.isValid == true,
+                stablePage = state.visionMetrics.stablePage,
+                allowedPages = setOf("MAIN"),
+                targetRect = null,
+                expectedPagesAfter = setOf("SETTINGS"),
+            ),
+        )
+        mutableUiState.value = state.copy(dryRunDecision = decision)
+        record("ACTION_GUARD_DRY_RUN", if (decision is GuardDecision.AllowDryRun) "ALLOW_DRY_RUN" else "DENY")
     }
 
     private fun refresh() {
@@ -174,6 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             ?.maxByOrNull { it.layer }
         val targetVisible = targetWindow != null
+        targetWindow?.bounds?.takeIf { it.isValid }?.let(::rememberVisionViewport)
         val targetActive = targetWindow?.let { it.isActive || it.isFocused } ?: false
         val gate = windowMonitor.observe(targetWindow?.bounds)
         val currentState = stateMachine.state.value
@@ -213,7 +263,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             recoveryRequirement = stateMachine.recoveryRequirement,
             accessibilityEnabled = accessibilityEnabled,
             captureState = captureController.state.value,
-            latestFrameBytes = captureController.latestFrame.value?.rgba?.size ?: 0,
+            frameMetadata = captureController.frameStore.metadata.value,
+            visionMetrics = visionWorker.metrics.value,
+            dryRunDecision = mutableUiState.value.dryRunDecision,
             targetPackageInput = priorInput.ifBlank { configuredPackage },
             targetVisible = targetVisible,
             targetActive = targetActive,
@@ -238,8 +290,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun deviceSummary(): String = "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}"
 
+    private fun rememberVisionViewport(bounds: WindowBounds) {
+        preferences.edit()
+            .putInt(visionViewportLeftKey, bounds.left)
+            .putInt(visionViewportTopKey, bounds.top)
+            .putInt(visionViewportRightKey, bounds.right)
+            .putInt(visionViewportBottomKey, bounds.bottom)
+            .apply()
+    }
+
+    private fun lastKnownVisionViewport(): WindowBounds? {
+        if (!preferences.contains(visionViewportRightKey)) return null
+        return WindowBounds(
+            preferences.getInt(visionViewportLeftKey, 0),
+            preferences.getInt(visionViewportTopKey, 0),
+            preferences.getInt(visionViewportRightKey, 0),
+            preferences.getInt(visionViewportBottomKey, 0),
+        ).takeIf { it.isValid }
+    }
+
     companion object {
         private const val targetPackageKey = "target_game_package"
         private const val targetActivationTimeoutMillis = 30_000L
+        private const val visionViewportLeftKey = "vision_viewport_left"
+        private const val visionViewportTopKey = "vision_viewport_top"
+        private const val visionViewportRightKey = "vision_viewport_right"
+        private const val visionViewportBottomKey = "vision_viewport_bottom"
     }
 }

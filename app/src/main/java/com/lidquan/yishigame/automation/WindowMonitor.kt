@@ -10,6 +10,8 @@ enum class WindowGate { NO_BASELINE, MATCHED, CHANGED, UNAVAILABLE }
 
 class WindowMonitor {
     private var acceptedBounds: WindowBounds? = null
+    var version: Long = 0
+        private set
 
     fun observe(bounds: WindowBounds?): WindowGate {
         if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
@@ -20,10 +22,12 @@ class WindowMonitor {
     fun accept(bounds: WindowBounds?): WindowGate {
         if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
         acceptedBounds = bounds
+        version += 1
         return WindowGate.MATCHED
     }
 
     fun clear() {
         acceptedBounds = null
+        version += 1
     }
 }
