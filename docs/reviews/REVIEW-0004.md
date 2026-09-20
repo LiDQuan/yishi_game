@@ -823,3 +823,184 @@ Codex 下一轮继续沿用 `feat/req-0004-android-foundation`，只修本轮 R2
 - `codex/handoff/LATEST.patch`
 
 然后再次交给 ChatGPT 做第三轮复审。
+
+
+---
+
+# 第三轮复审（R3）
+
+复审日期：2026-09-20  
+复审实现提交：`a8c57d61566380a0e5fa0153c351db28d39dfa52`  
+交接提交：`c6c4be08c55f1d48eea2c7fe55c8eac5d073077d`  
+关联 Issue：#1 `REQ-0004 R2：目标游戏切回前台后恢复语义待定`  
+状态：**ACCEPTED**
+
+## R3-1. Issue #1 / R2-BLOCKER-01 复核
+
+Issue #1 的产品决策为：
+
+- 暂停后必须由用户显式恢复。
+- 显式恢复只进入 `WAIT_TARGET_ACTIVE`。
+- 只有目标游戏重新 active/focused、窗口门禁为 MATCHED、采集会话有效、辅助功能服务真实连接时，才可回到运行态。
+- 单纯重新获得焦点不得从 PAUSED 自动恢复。
+- 窗口变化/不可用、采集失效、辅助功能失效必须重新执行完整环境检查。
+
+当前实现符合该决策。
+
+### 启动握手
+
+```text
+READY
+→ 用户点击“准备启动”
+→ WAIT_TARGET_ACTIVE
+→ 用户切回游戏
+→ target active/focused + window MATCHED + capture Active
+→ RUNNING_PLACEHOLDER
+```
+
+助手获得焦点时不再要求游戏同时 active，因此不存在第二轮发现的 GUI 启动死锁。
+
+### 显式恢复
+
+运行中目标失焦：
+
+```text
+RUNNING_PLACEHOLDER
+→ TARGET_NOT_ACTIVE
+→ PAUSED
+→ RecoveryRequirement.EXPLICIT_CONFIRMATION
+```
+
+目标游戏随后即使重新 active，也不会自动进入运行态。
+
+用户必须：
+
+```text
+点击“显式恢复并重新握手”
+→ WAIT_TARGET_ACTIVE
+→ 再次切回游戏
+→ 重新通过实时门禁
+→ RUNNING_PLACEHOLDER
+```
+
+符合产品决策。
+
+### 强制环境复查
+
+以下原因会将恢复要求升级为 `ENVIRONMENT_CHECK`：
+
+- WINDOW_CHANGED
+- WINDOW_UNAVAILABLE
+- CAPTURE_INACTIVE
+- ACCESSIBILITY_UNAVAILABLE
+
+在该恢复要求下：
+
+- 普通 RequestResume 被拒绝。
+- UI 不提供普通恢复路径。
+- 必须重新执行 PRECHECK / WINDOW_CHECK。
+- WindowVerified 后才重新获得 READY。
+
+符合“环境故障不得绕过完整复查”的要求。
+
+### 等待超时
+
+`WAIT_TARGET_ACTIVE` 超过 30 秒会进入：
+
+```text
+PAUSED + EXPLICIT_CONFIRMATION
+```
+
+不会继续运行或发送输入，行为保守且可恢复。
+
+## R3-2. SurfaceView / Cocos 窗口识别复核
+
+当前实现针对 `window.root?.packageName == null` 的 SurfaceView 场景，使用 AccessibilityEvent 的 `windowId → packageName` 作为窗口身份补充；是否允许运行仍使用实时 `AccessibilityWindowInfo.isActive / isFocused` 和实时 bounds。
+
+这一实现满足 M0 的验证目标。
+
+需要保留的后续注意事项：
+
+- 进入真实游戏输入阶段后，Action Guard 不应仅依赖 windowId 映射作为页面身份依据。
+- M1 页面识别仍应结合视觉证据、目标窗口 bounds 和 active/focused 状态。
+- 若后续发现 ZUI/Cocos 存在 windowId 复用，应增加映射失效/刷新机制。
+
+本项不阻塞 REQ-0004。
+
+## R3-3. 测试门禁复核
+
+Codex 已在最终代码上记录并完成：
+
+- `testDebugUnitTest assembleDebug`：通过。
+- `connectedDebugAndroidTest`：2 项通过，0 失败，0 跳过。
+- Pad Inspector：5 项通过。
+- 公开仓库安全扫描：通过。
+- `git diff --check`：通过。
+- 真机完整 GUI：
+  - 环境检查 → READY
+  - 准备启动 → WAIT_TARGET_ACTIVE
+  - 游戏聚焦 → RUNNING_PLACEHOLDER
+  - 助手聚焦 → PAUSED
+  - 游戏单纯重新聚焦仍保持 PAUSED
+  - 显式恢复 → WAIT_TARGET_ACTIVE
+  - 再次聚焦游戏 → RUNNING_PLACEHOLDER
+
+并确认 M0 全程未向游戏内容区发送点击、滑动、返回、OCR、模板匹配、副本或战斗操作。
+
+测试证据满足本阶段验收。
+
+## R3-4. 第一、二轮问题最终状态
+
+第一轮：
+
+- BLOCKER-01 MediaProjection 持续帧：**PASS**
+- BLOCKER-02 前台/焦点识别：**PASS**
+- BLOCKER-03 窗口门禁：**PASS**
+- BLOCKER-04 STOPPED 竞态：**PASS**
+- TEST/SECURITY-01 私有文件 0600：**PASS**
+- IMPROVEMENT-01 DailyExecution 幂等：**PASS**
+
+第二轮：
+
+- R2-BLOCKER-01 GUI 安全启动握手：**PASS**
+- R2-TEST-GATE-01 最终真机/仪器测试：**PASS**
+
+## R3-5. 非阻塞技术债
+
+### 高分辨率帧缓冲分配
+
+当前持续采集仍会创建全屏 RGBA `ByteArray`。
+
+M0 可接受，但进入 M1 视觉识别前必须处理：
+
+- 降低识别帧率。
+- 优先 ROI。
+- 缓冲池/复用。
+- 避免 Compose 因每帧大对象变化而刷新整个 UI。
+- 视觉层按需取得 snapshot。
+
+### IMPLEMENT-0004 历史正文存在旧描述
+
+`IMPLEMENT-0004.md` 前半部分保留了初版 M0 的历史描述，例如“MediaProjection 仅捕获一帧”，后面的 Review 修订章节已经给出最终行为。
+
+这不会影响代码验收，但后续可将报告整理为“最终状态 + 修订历史”以降低阅读歧义。
+
+## R3-6. 最终结论
+
+```text
+REQ-0004 = ACCEPTED
+Issue #1 = FIXED
+允许创建 Pull Request：feat/req-0004-android-foundation → main
+允许进入合并前 PR 检查
+暂不开始 REQ-0005，直到 REQ-0004 合入 main
+```
+
+本轮不再要求 Codex修改 REQ-0004 功能代码。
+
+合并后可以开始下一阶段需求设计，但 M1 在加入页面识别和真实游戏输入前，必须继续遵守：
+
+- Action Guard 统一输入入口。
+- targetActive / window MATCHED 门禁。
+- 未确认页面不得点击。
+- 未确认免费状态不得消耗次数或资源。
+- 视觉识别前先处理高分辨率帧内存/刷新策略。
