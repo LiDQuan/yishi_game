@@ -76,6 +76,29 @@ REQ-0004
 - 为本机包名输入增加可访问性语义与手工真机回归用例；不要通过 shell 输入法注入替代用户确认。
 - 将 `testDebugUnitTest`、`connectedDebugAndroidTest`、Pad Inspector 测试和安全扫描纳入 CI/发布前检查。
 
+## Review-0004 修订
+
+实现提交 `c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8` 修复本轮全部 BLOCKER、TEST/SECURITY 项，并完成建议的 DailyExecution 幂等测试：
+
+- BLOCKER-01：MediaProjection 改为持续单会话；每帧在关闭 `Image` 前复制 RGBA、stride 与 timestamp，`latestFrame` 可供后续识别层读取。停止或系统回收投屏进入明确 `Stopped` 状态。
+- BLOCKER-02：事件包名改为仅诊断用途；目标有效性改为同时要求 active-root 包名匹配及同包 active/focused 窗口。
+- BLOCKER-03：窗口监测改为 `NO_BASELINE/MATCHED/CHANGED/UNAVAILABLE` 门禁。窗口变化会使 READY 回到 WINDOW_CHECK、RUNNING 进入 PAUSED；开始前再次同步检查门禁。
+- BLOCKER-04：STOPPED 成为稳定终态，忽略延迟 Fail；Reset 后才返回 IDLE。
+- TEST/SECURITY-01：Pad Inspector 的全部原始文本、XML、PNG、JSON 统一由私有 writer 创建并强制 `0600`；测试覆盖每种 artifact。
+- IMPROVEMENT-01：DailyExecution DAO 通过 `INSERT IGNORE + getOrCreate` 按业务唯一键复用既有记录，防止 SUCCESS 被新 PENDING 覆盖。
+
+## 修订测试结果
+
+- `testDebugUnitTest`：通过；覆盖 STOPPED 延迟失败、窗口门禁、开始条件和非空帧字节复制。
+- `connectedDebugAndroidTest`：本轮修订后曾成功执行 2 项 Room 测试；最后一次完整复跑时无线 ADB 无 ready 设备，任务未启动，属于外部连接不可达，未标记为通过。
+- `tools/pad-inspector/test_pad_inspector.py`：5 项通过，包含 `0600` 文件权限。
+- 公开仓库安全扫描：通过。
+- 真机：助手自身的持续投屏会话在界面更新下达到 33 帧；停止后采集和自动化均为 STOPPED，未出现异步失败污染。游戏窗口可见但助手为 active 时显示“未识别”且开始按钮禁用。系统共享选择器曾切换至无关应用，已立即 force-stop 助手并确认捕获服务停止；没有把该内容写入仓库或报告。
+
+## 修订后已知问题
+
+- 无线 ADB 当前可经 mDNS 发现，但连接服务不可达；需要 Pad 恢复 ready 后重跑最终 `connectedDebugAndroidTest`，再做第二轮复审。
+
 ## Git commit hash
 
-`799c044380766dbb13a234665d919fc842136bed`
+`c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8`
