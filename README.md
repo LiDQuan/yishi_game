@@ -16,26 +16,38 @@
 
 ## 当前状态
 
-项目处于 MVP 基础设施阶段。
-
-已完成：
+### 已完成
 
 - ChatGPT ↔ Codex 协作规范
 - 公开仓库安全基线
 - GitHub 主仓库迁移
-- 无线 ADB 已在目标 Pad 与 Mac 之间打通
+- 无线 ADB 与目标 Pad 开发链路
+- **REQ-0004 Android M0 基础设施**
+  - Compose APK
+  - AccessibilityService
+  - MediaProjection 持续帧
+  - 自由窗口安全门禁
+  - READY / WAIT_TARGET_ACTIVE / RUNNING / PAUSED 安全握手
+  - Room 基础数据模型
+  - Pad Inspector
+  - 真机测试与安全扫描
 
-下一开发任务：
+### 当前开发任务
 
-- [REQ-0004：Android MVP 基础设施与 Pad 环境采集](docs/requirements/REQ-0004.md)
+- [REQ-0005：M1 视觉识别基础设施与 Action Guard Dry-Run](docs/requirements/REQ-0005.md)
+
+REQ-0005 的目标是让 APK 能稳定“看懂”真实游戏页面，但仍然**不向游戏执行真实点击**。
 
 ## 文档入口
 
 - [总体产品需求 REQ-0003](docs/requirements/REQ-0003.md)
-- [第一开发任务 REQ-0004](docs/requirements/REQ-0004.md)
+- [REQ-0004 Android M0](docs/requirements/REQ-0004.md)
+- [REQ-0005 视觉识别与 Action Guard](docs/requirements/REQ-0005.md)
 - [系统架构](docs/architecture/system-design.md)
 - [自动化状态机](docs/architecture/state-machine.md)
 - [数据模型](docs/architecture/data-model.md)
+- [视觉识别管线](docs/architecture/vision-pipeline.md)
+- [Action Guard](docs/architecture/action-guard.md)
 - [协作流程](docs/WORKFLOW.md)
 - [Codex 开工入口](codex/START_HERE.md)
 
