@@ -1,1540 +1,744 @@
-diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 3d21d19..e160ccd 100644
---- a/app/build.gradle.kts
-+++ b/app/build.gradle.kts
-@@ -13,7 +13,7 @@ android {
-         minSdk = 26
-         targetSdk = 35
-         versionCode = 1
--        versionName = "0.1.0-m0"
-+        versionName = "0.2.0-m1"
-
-         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-         vectorDrawables.useSupportLibrary = true
-@@ -59,6 +59,7 @@ dependencies {
-     implementation("androidx.compose.ui:ui-tooling-preview")
-     implementation("androidx.compose.material3:material3")
-     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
-
-     implementation("androidx.room:room-runtime:2.6.1")
-     implementation("androidx.room:room-ktx:2.6.1")
 diff --git a/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt b/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
-new file mode 100644
-index 0000000..cd095cf
---- /dev/null
+index cd095cf..747bc6b 100644
+--- a/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
 +++ b/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
-@@ -0,0 +1,59 @@
-+package com.lidquan.yishigame.vision
-+
-+import android.content.Context
-+import android.graphics.BitmapFactory
-+import androidx.test.core.app.ApplicationProvider
-+import androidx.test.ext.junit.runners.AndroidJUnit4
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
-+import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
-+import java.io.File
-+import kotlinx.coroutines.runBlocking
-+import org.junit.Assert.assertEquals
-+import org.junit.Assume.assumeTrue
-+import org.junit.Test
-+import org.junit.runner.RunWith
-+
-+@RunWith(AndroidJUnit4::class)
-+class RealVisionFixtureTest {
-+    @Test
-+    fun recognizesThreePrivateRealPagesWithoutGameInput() = runBlocking {
-+        val fixtureDir = File(ApplicationProvider.getApplicationContext<Context>().filesDir, "vision-fixtures")
-+        val fixtures = mapOf(
-+            "settings.png" to "SETTINGS",
-+            "character-select.png" to "CHARACTER_SELECT",
-+            "dungeon.png" to "DUNGEON_LIST",
-+        )
-+        assumeTrue("Private fixtures are intentionally absent from the repository", fixtures.keys.all { File(fixtureDir, it).isFile })
-+        val engine = ConfiguredVisionEngine(
-+            ocr = MlKitChineseOcrEngine(),
-+            viewport = { WindowBounds(99, 7, 1119, 1717) },
-+        )
-+        try {
-+            fixtures.forEach { (name, expectedPage) ->
-+                val detection = engine.analyze(frame(File(fixtureDir, name))).detection
-+                assertEquals(expectedPage, (detection as PageDetection.Matched).pageId)
-+            }
-+        } finally {
-+            engine.close()
-+        }
-+    }
-+
-+    private fun frame(file: File): ScreenFrameSnapshot {
-+        val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-+        val width = bitmap.width
-+        val height = bitmap.height
-+        val pixels = IntArray(width * height)
-+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-+        val rgba = ByteArray(pixels.size * 4)
-+        pixels.forEachIndexed { index, color ->
-+            val offset = index * 4
-+            rgba[offset] = (color shr 16).toByte()
-+            rgba[offset + 1] = (color shr 8).toByte()
-+            rgba[offset + 2] = color.toByte()
-+            rgba[offset + 3] = (color ushr 24).toByte()
-+        }
-+        bitmap.recycle()
-+        return ScreenFrameSnapshot(1, width, height, width * 4, 4, 1, rgba)
-+    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-index 8d2c943..566ce61 100644
---- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-@@ -16,12 +16,23 @@ import com.lidquan.yishigame.automation.AutomationStateMachine
+@@ -7,12 +7,23 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
  import com.lidquan.yishigame.automation.WindowBounds
- import com.lidquan.yishigame.automation.WindowGate
- import com.lidquan.yishigame.automation.WindowMonitor
+ import com.lidquan.yishigame.capture.ScreenFrameSnapshot
+ import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
 +import com.lidquan.yishigame.action.ActionContext
 +import com.lidquan.yishigame.action.ActionGuard
 +import com.lidquan.yishigame.action.ActionIntent
 +import com.lidquan.yishigame.action.ActionType
 +import com.lidquan.yishigame.action.GuardDecision
 +import com.lidquan.yishigame.action.RiskLevel
- import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
- import com.lidquan.yishigame.capture.ScreenCaptureController
- import com.lidquan.yishigame.capture.ScreenCaptureState
-+import com.lidquan.yishigame.capture.FrameMetadata
- import com.lidquan.yishigame.config.TargetGameConfig
- import com.lidquan.yishigame.diagnostics.DiagnosticEvent
- import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
-+import com.lidquan.yishigame.vision.VisionMetrics
-+import com.lidquan.yishigame.vision.VisionWorker
-+import com.lidquan.yishigame.vision.ConfiguredVisionEngine
-+import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
++import com.lidquan.yishigame.automation.AutomationState
++import com.lidquan.yishigame.automation.WindowGate
++import com.lidquan.yishigame.capture.ScreenCaptureState
+ import java.io.File
+ import kotlinx.coroutines.runBlocking
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
+ import org.junit.Assume.assumeTrue
+ import org.junit.Test
+ import org.junit.runner.RunWith
++import org.json.JSONObject
+
+ @RunWith(AndroidJUnit4::class)
+ class RealVisionFixtureTest {
+@@ -24,21 +35,59 @@ class RealVisionFixtureTest {
+             "character-select.png" to "CHARACTER_SELECT",
+             "dungeon.png" to "DUNGEON_LIST",
+         )
+-        assumeTrue("Private fixtures are intentionally absent from the repository", fixtures.keys.all { File(fixtureDir, it).isFile })
+-        val engine = ConfiguredVisionEngine(
+-            ocr = MlKitChineseOcrEngine(),
+-            viewport = { WindowBounds(99, 7, 1119, 1717) },
+-        )
+-        try {
+-            fixtures.forEach { (name, expectedPage) ->
+-                val detection = engine.analyze(frame(File(fixtureDir, name))).detection
+-                assertEquals(expectedPage, (detection as PageDetection.Matched).pageId)
++        assumeTrue("Private fixtures and metadata are intentionally absent from the repository", fixtures.keys.all {
++            File(fixtureDir, it).isFile && File(fixtureDir, "$it.json").isFile
++        })
++        fixtures.forEach { (name, expectedPage) ->
++            val viewport = metadata(File(fixtureDir, "$name.json"))
++            val engine = ConfiguredVisionEngine(ocr = MlKitChineseOcrEngine(), viewport = { viewport })
++            try {
++                val analysis = engine.analyze(frame(File(fixtureDir, name)))
++                val detection = analysis.detection as PageDetection.Matched
++                assertEquals(expectedPage, detection.pageId)
++                if (expectedPage == "DUNGEON_LIST") assertDungeonDryRun(detection, analysis, viewport)
++            } finally {
++                engine.close()
+             }
+-        } finally {
+-            engine.close()
+         }
+     }
+
++    private fun assertDungeonDryRun(detection: PageDetection.Matched, analysis: VisionAnalysis, viewport: WindowBounds) {
++        val anchor = detection.evidences.first { it.id == "dungeon.anchor" }.rect
++        val stable = StablePage(detection.pageId, detection.confidence, 1_000, 7, detection.evidences.associate { it.id to it.rect })
++        val context = ActionContext(
++            automationState = AutomationState.RUNNING_PLACEHOLDER,
++            accessibilityConnected = true,
++            captureState = ScreenCaptureState.Active(1, 1, 1),
++            targetVisible = true,
++            targetActive = true,
++            windowGate = WindowGate.MATCHED,
++            viewportValid = viewport.isValid,
++            stablePage = stable,
++            currentViewportVersion = 7,
++            now = 1_100,
++            allowedPages = setOf("DUNGEON_LIST"),
++            targetRect = anchor,
++            expectedPagesAfter = setOf("DUNGEON_LIST"),
++            freeAttemptState = analysis.freeAttemptState,
++        )
++        val intent = ActionIntent(ActionType.OPEN_DUNGEON, "dungeon.anchor", RiskLevel.NORMAL)
++        assertTrue(ActionGuard.plan(intent, context) is GuardDecision.AllowDryRun)
++        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, context.copy(targetActive = false)) as GuardDecision.Deny).reason)
++        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, context.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
++        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, context.copy(targetRect = null)) as GuardDecision.Deny).reason)
++    }
++
++    private fun metadata(file: File): WindowBounds {
++        val root = JSONObject(file.readText())
++        val window = bounds(root.getJSONObject("windowBounds"))
++        val content = bounds(root.getJSONObject("contentViewport"))
++        require(root.getLong("profileVersion") > 0 && content.left >= window.left && content.top >= window.top && content.right <= window.right && content.bottom <= window.bottom)
++        return content
++    }
++
++    private fun bounds(json: JSONObject) = WindowBounds(json.getInt("left"), json.getInt("top"), json.getInt("right"), json.getInt("bottom"))
++
+     private fun frame(file: File): ScreenFrameSnapshot {
+         val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+         val width = bitmap.width
+diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+index 566ce61..b7cb82c 100644
+--- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
++++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+@@ -33,6 +33,7 @@ import com.lidquan.yishigame.vision.VisionMetrics
+ import com.lidquan.yishigame.vision.VisionWorker
+ import com.lidquan.yishigame.vision.ConfiguredVisionEngine
+ import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
++import com.lidquan.yishigame.viewport.WindowGeometry
  import kotlinx.coroutines.flow.MutableStateFlow
  import kotlinx.coroutines.flow.StateFlow
  import kotlinx.coroutines.flow.asStateFlow
-@@ -34,7 +45,9 @@ data class EnvironmentUiState(
-     val recoveryRequirement: RecoveryRequirement = RecoveryRequirement.NONE,
-     val accessibilityEnabled: Boolean = false,
-     val captureState: ScreenCaptureState = ScreenCaptureState.NotRequested,
--    val latestFrameBytes: Int = 0,
-+    val frameMetadata: FrameMetadata = FrameMetadata(),
-+    val visionMetrics: VisionMetrics = VisionMetrics(),
-+    val dryRunDecision: GuardDecision? = null,
-     val targetPackageInput: String = "",
+@@ -52,6 +53,7 @@ data class EnvironmentUiState(
      val targetVisible: Boolean = false,
      val targetActive: Boolean = false,
-@@ -65,6 +78,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-     private val stateMachine = AutomationStateMachine()
-     private val windowMonitor = WindowMonitor()
+     val windowBounds: WindowBounds? = null,
++    val contentViewport: WindowBounds? = null,
+     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
+     val deviceSummary: String = "",
+     val recentEvents: List<DiagnosticEvent> = emptyList(),
+@@ -80,10 +82,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      private val captureController: ScreenCaptureController = MediaProjectionScreenCaptureController(appContext)
-+    private val visionEngine = ConfiguredVisionEngine(
-+        ocr = MlKitChineseOcrEngine(),
-+        viewport = { mutableUiState.value.windowBounds ?: lastKnownVisionViewport() },
-+    )
-+    private val visionWorker = VisionWorker(captureController.frameStore, analyze = visionEngine::analyze)
+     private val visionEngine = ConfiguredVisionEngine(
+         ocr = MlKitChineseOcrEngine(),
+-        viewport = { mutableUiState.value.windowBounds ?: lastKnownVisionViewport() },
++        viewport = { confirmedGeometry(mutableUiState.value.windowBounds)?.contentViewport },
+     )
+     private val visionWorker = VisionWorker(captureController.frameStore, analyze = visionEngine::analyze)
      private var targetActivationTimeout: Job? = null
++    private var lastCaptureActive = false
++    private var lastVisionPackage = ""
++    private var lastVisionGate: WindowGate? = null
      private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
      val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
-@@ -72,11 +90,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-     init {
-         viewModelScope.launch { stateMachine.state.collect { refresh() } }
-         viewModelScope.launch { captureController.state.collect { refresh() } }
--        viewModelScope.launch { captureController.latestFrame.collect { refresh() } }
-+        viewModelScope.launch { captureController.frameStore.metadata.collect { refresh() } }
-+        viewModelScope.launch { visionWorker.metrics.collect { refresh() } }
-         viewModelScope.launch { GameAccessibilityService.connected.collect { refresh() } }
-         viewModelScope.launch { GameAccessibilityService.lastEventPackage.collect { refresh() } }
-         viewModelScope.launch { DiagnosticRecorder.events.collect { refresh() } }
+
+@@ -116,6 +121,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         preferences.edit().putString(targetPackageKey, config.packageName.orEmpty()).apply()
+         record("TARGET_CONFIG", if (config.packageName == null) "INVALID_OR_EMPTY" else "SAVED")
+         windowMonitor.clear()
++        clearContentViewportProfile()
++        visionWorker.invalidate()
          refresh()
-+        visionWorker.start(viewModelScope) { windowMonitor.version }
      }
 
-     fun capturePermissionIntent(): Intent = captureController.permissionIntent()
-@@ -160,9 +180,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         targetActivationTimeout?.cancel()
-         stateMachine.dispatch(AutomationEvent.Stop)
-         captureController.stop()
-+        visionWorker.stop()
-         record("STOP", "STOPPED")
+@@ -136,6 +143,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
+             return
+         }
++        acceptContentViewportProfile(snapshot.windowBounds, snapshot.windowBounds)
++        visionWorker.invalidate()
+         stateMachine.dispatch(AutomationEvent.DeviceReady)
+         stateMachine.dispatch(AutomationEvent.CheckWindow)
+         stateMachine.dispatch(AutomationEvent.WindowVerified)
+@@ -190,10 +199,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         super.onCleared()
      }
 
-+    override fun onCleared() {
-+        visionWorker.stop()
-+        visionEngine.close()
-+        super.onCleared()
-+    }
-+
-+    fun evaluateOpenSettingsDryRun() {
-+        val state = mutableUiState.value
-+        val decision = ActionGuard.plan(
-+            ActionIntent(ActionType.OPEN_SETTINGS, riskLevel = RiskLevel.SAFE),
-+            ActionContext(
-+                automationState = state.automationState,
-+                accessibilityConnected = state.accessibilityEnabled,
-+                captureState = state.captureState,
-+                targetVisible = state.targetVisible,
-+                targetActive = state.targetActive,
-+                windowGate = state.windowGate,
-+                viewportValid = state.windowBounds?.isValid == true,
-+                stablePage = state.visionMetrics.stablePage,
-+                allowedPages = setOf("MAIN"),
-+                targetRect = null,
-+                expectedPagesAfter = setOf("SETTINGS"),
-+            ),
-+        )
+-    fun evaluateOpenSettingsDryRun() {
++    fun evaluateDungeonAnchorDryRun() {
+         val state = mutableUiState.value
+-        val decision = ActionGuard.plan(
+-            ActionIntent(ActionType.OPEN_SETTINGS, riskLevel = RiskLevel.SAFE),
++        val decision = dungeonAnchorDryRun(state)
 +        mutableUiState.value = state.copy(dryRunDecision = decision)
 +        record("ACTION_GUARD_DRY_RUN", if (decision is GuardDecision.AllowDryRun) "ALLOW_DRY_RUN" else "DENY")
 +    }
 +
++    private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
++        ActionGuard.plan(
++            ActionIntent(ActionType.OPEN_DUNGEON, targetId = "dungeon.anchor", riskLevel = RiskLevel.NORMAL),
+             ActionContext(
+                 automationState = state.automationState,
+                 accessibilityConnected = state.accessibilityEnabled,
+@@ -201,16 +216,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                 targetVisible = state.targetVisible,
+                 targetActive = state.targetActive,
+                 windowGate = state.windowGate,
+-                viewportValid = state.windowBounds?.isValid == true,
++                viewportValid = state.contentViewport?.isValid == true,
+                 stablePage = state.visionMetrics.stablePage,
+-                allowedPages = setOf("MAIN"),
+-                targetRect = null,
+-                expectedPagesAfter = setOf("SETTINGS"),
++                currentViewportVersion = windowMonitor.version,
++                now = System.currentTimeMillis(),
++                allowedPages = setOf("DUNGEON_LIST"),
++                targetRect = state.visionMetrics.stablePage?.anchors?.get("dungeon.anchor"),
++                expectedPagesAfter = setOf("DUNGEON_LIST"),
+             ),
+         )
+-        mutableUiState.value = state.copy(dryRunDecision = decision)
+-        record("ACTION_GUARD_DRY_RUN", if (decision is GuardDecision.AllowDryRun) "ALLOW_DRY_RUN" else "DENY")
+-    }
+
      private fun refresh() {
          val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
-         val service = GameAccessibilityService.instance
-@@ -174,6 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -223,11 +237,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
              }
              ?.maxByOrNull { it.layer }
          val targetVisible = targetWindow != null
-+        targetWindow?.bounds?.takeIf { it.isValid }?.let(::rememberVisionViewport)
+-        targetWindow?.bounds?.takeIf { it.isValid }?.let(::rememberVisionViewport)
          val targetActive = targetWindow?.let { it.isActive || it.isFocused } ?: false
          val gate = windowMonitor.observe(targetWindow?.bounds)
          val currentState = stateMachine.state.value
-@@ -213,7 +263,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         val captureActive = captureController.state.value is ScreenCaptureState.Active
++        if (
++            captureActive != lastCaptureActive ||
++            configuredPackage != lastVisionPackage ||
++            (gate != lastVisionGate && gate != WindowGate.MATCHED)
++        ) {
++            visionWorker.invalidate()
++        }
++        lastCaptureActive = captureActive
++        lastVisionPackage = configuredPackage
++        lastVisionGate = gate
+         val accessibilityEnabled = GameAccessibilityService.connected.value
+         val handshakeStates = setOf(
+             AutomationState.WAIT_TARGET_ACTIVE,
+@@ -258,7 +281,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             }
+         }
+         val priorInput = mutableUiState.value.targetPackageInput
+-        mutableUiState.value = EnvironmentUiState(
++        val refreshed = EnvironmentUiState(
+             automationState = stateMachine.state.value,
              recoveryRequirement = stateMachine.recoveryRequirement,
              accessibilityEnabled = accessibilityEnabled,
-             captureState = captureController.state.value,
--            latestFrameBytes = captureController.latestFrame.value?.rgba?.size ?: 0,
-+            frameMetadata = captureController.frameStore.metadata.value,
-+            visionMetrics = visionWorker.metrics.value,
-+            dryRunDecision = mutableUiState.value.dryRunDecision,
-             targetPackageInput = priorInput.ifBlank { configuredPackage },
+@@ -270,10 +293,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
              targetVisible = targetVisible,
              targetActive = targetActive,
-@@ -238,8 +290,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             windowBounds = targetWindow?.bounds,
++            contentViewport = confirmedGeometry(targetWindow?.bounds)?.contentViewport,
+             windowGate = gate,
+             deviceSummary = deviceSummary(),
+             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
+         )
++        mutableUiState.value = refreshed.copy(dryRunDecision = dungeonAnchorDryRun(refreshed))
+     }
+
+     private fun record(eventType: String, result: String, errorCode: String? = null) {
+@@ -290,31 +315,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
      private fun deviceSummary(): String = "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}"
 
-+    private fun rememberVisionViewport(bounds: WindowBounds) {
-+        preferences.edit()
-+            .putInt(visionViewportLeftKey, bounds.left)
-+            .putInt(visionViewportTopKey, bounds.top)
-+            .putInt(visionViewportRightKey, bounds.right)
-+            .putInt(visionViewportBottomKey, bounds.bottom)
-+            .apply()
+-    private fun rememberVisionViewport(bounds: WindowBounds) {
++    private fun acceptContentViewportProfile(window: WindowBounds, content: WindowBounds) {
+         preferences.edit()
+-            .putInt(visionViewportLeftKey, bounds.left)
+-            .putInt(visionViewportTopKey, bounds.top)
+-            .putInt(visionViewportRightKey, bounds.right)
+-            .putInt(visionViewportBottomKey, bounds.bottom)
++            .putInt(profileWindowLeftKey, window.left)
++            .putInt(profileWindowTopKey, window.top)
++            .putInt(profileWindowRightKey, window.right)
++            .putInt(profileWindowBottomKey, window.bottom)
++            .putInt(contentViewportLeftKey, content.left)
++            .putInt(contentViewportTopKey, content.top)
++            .putInt(contentViewportRightKey, content.right)
++            .putInt(contentViewportBottomKey, content.bottom)
++            .putLong(contentViewportProfileVersionKey, windowMonitor.version)
+             .apply()
+     }
+
+-    private fun lastKnownVisionViewport(): WindowBounds? {
+-        if (!preferences.contains(visionViewportRightKey)) return null
+-        return WindowBounds(
+-            preferences.getInt(visionViewportLeftKey, 0),
+-            preferences.getInt(visionViewportTopKey, 0),
+-            preferences.getInt(visionViewportRightKey, 0),
+-            preferences.getInt(visionViewportBottomKey, 0),
+-        ).takeIf { it.isValid }
++    private fun confirmedGeometry(currentWindow: WindowBounds?): WindowGeometry? {
++        if (currentWindow == null || !preferences.contains(contentViewportProfileVersionKey)) return null
++        val profileWindow = WindowBounds(
++            preferences.getInt(profileWindowLeftKey, 0), preferences.getInt(profileWindowTopKey, 0),
++            preferences.getInt(profileWindowRightKey, 0), preferences.getInt(profileWindowBottomKey, 0),
++        )
++        val geometry = WindowGeometry(
++            windowBounds = profileWindow,
++            contentViewport = WindowBounds(
++                preferences.getInt(contentViewportLeftKey, 0), preferences.getInt(contentViewportTopKey, 0),
++                preferences.getInt(contentViewportRightKey, 0), preferences.getInt(contentViewportBottomKey, 0),
++            ),
++            profileVersion = preferences.getLong(contentViewportProfileVersionKey, 0),
++        )
++        return geometry.takeIf { it.isConfirmed && it.windowBounds == currentWindow }
 +    }
 +
-+    private fun lastKnownVisionViewport(): WindowBounds? {
-+        if (!preferences.contains(visionViewportRightKey)) return null
-+        return WindowBounds(
-+            preferences.getInt(visionViewportLeftKey, 0),
-+            preferences.getInt(visionViewportTopKey, 0),
-+            preferences.getInt(visionViewportRightKey, 0),
-+            preferences.getInt(visionViewportBottomKey, 0),
-+        ).takeIf { it.isValid }
-+    }
-+
++    private fun clearContentViewportProfile() {
++        preferences.edit().remove(contentViewportProfileVersionKey).apply()
+     }
+
      companion object {
          private const val targetPackageKey = "target_game_package"
          private const val targetActivationTimeoutMillis = 30_000L
-+        private const val visionViewportLeftKey = "vision_viewport_left"
-+        private const val visionViewportTopKey = "vision_viewport_top"
-+        private const val visionViewportRightKey = "vision_viewport_right"
-+        private const val visionViewportBottomKey = "vision_viewport_bottom"
+-        private const val visionViewportLeftKey = "vision_viewport_left"
+-        private const val visionViewportTopKey = "vision_viewport_top"
+-        private const val visionViewportRightKey = "vision_viewport_right"
+-        private const val visionViewportBottomKey = "vision_viewport_bottom"
++        private const val profileWindowLeftKey = "profile_window_left"
++        private const val profileWindowTopKey = "profile_window_top"
++        private const val profileWindowRightKey = "profile_window_right"
++        private const val profileWindowBottomKey = "profile_window_bottom"
++        private const val contentViewportLeftKey = "content_viewport_left"
++        private const val contentViewportTopKey = "content_viewport_top"
++        private const val contentViewportRightKey = "content_viewport_right"
++        private const val contentViewportBottomKey = "content_viewport_bottom"
++        private const val contentViewportProfileVersionKey = "content_viewport_profile_version"
      }
  }
 diff --git a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
-new file mode 100644
-index 0000000..0193b38
---- /dev/null
+index 0193b38..66d9f5d 100644
+--- a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
-@@ -0,0 +1,77 @@
-+package com.lidquan.yishigame.action
-+
-+import com.lidquan.yishigame.automation.AutomationState
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.automation.WindowGate
-+import com.lidquan.yishigame.capture.ScreenCaptureState
-+import com.lidquan.yishigame.viewport.ScreenPoint
-+import com.lidquan.yishigame.vision.FreeAttemptState
-+import com.lidquan.yishigame.vision.StablePage
-+
-+enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
-+enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
-+enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
-+
-+data class ActionIntent(val type: ActionType, val targetId: String? = null, val riskLevel: RiskLevel)
-+data class ActionPlan(
-+    val intent: ActionIntent,
-+    val targetRect: WindowBounds,
-+    val tapPoint: ScreenPoint,
-+    val expectedPageBefore: String,
-+    val expectedPageAfter: Set<String>,
-+    val timeoutMs: Long,
-+)
-+
-+data class ActionContext(
-+    val automationState: AutomationState,
-+    val accessibilityConnected: Boolean,
-+    val captureState: ScreenCaptureState,
-+    val targetVisible: Boolean,
-+    val targetActive: Boolean,
-+    val windowGate: WindowGate,
-+    val viewportValid: Boolean,
-+    val stablePage: StablePage?,
-+    val allowedPages: Set<String>,
-+    val targetRect: WindowBounds?,
-+    val expectedPagesAfter: Set<String>,
-+    val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
-+    val dailyAlreadySuccess: Boolean = false,
-+    val purchaseSignalPresent: Boolean = false,
-+)
-+
-+sealed interface GuardDecision {
-+    data class AllowDryRun(val plan: ActionPlan, val evidences: List<String>) : GuardDecision
-+    data class Deny(val reason: GuardDenyReason, val evidences: List<String>) : GuardDecision
-+}
-+
-+object ActionGuard {
-+    fun plan(intent: ActionIntent, context: ActionContext): GuardDecision {
-+        fun deny(reason: GuardDenyReason) = GuardDecision.Deny(reason, listOf(reason.name))
-+        if (intent.riskLevel == RiskLevel.FORBIDDEN_AUTO || intent.type == ActionType.PURCHASE) return deny(GuardDenyReason.FORBIDDEN_AUTO)
-+        if (context.automationState != AutomationState.RUNNING_PLACEHOLDER) return deny(GuardDenyReason.AUTOMATION_NOT_RUNNING)
-+        if (!context.accessibilityConnected) return deny(GuardDenyReason.ACCESSIBILITY_UNAVAILABLE)
-+        if (context.captureState !is ScreenCaptureState.Active) return deny(GuardDenyReason.CAPTURE_INACTIVE)
-+        if (!context.targetVisible) return deny(GuardDenyReason.TARGET_NOT_VISIBLE)
-+        if (!context.targetActive) return deny(GuardDenyReason.TARGET_NOT_ACTIVE)
-+        if (context.windowGate != WindowGate.MATCHED) return deny(GuardDenyReason.WINDOW_NOT_MATCHED)
-+        if (!context.viewportValid) return deny(GuardDenyReason.VIEWPORT_INVALID)
-+        val page = context.stablePage ?: return deny(GuardDenyReason.PAGE_NOT_STABLE)
-+        if (page.pageId !in context.allowedPages) return deny(GuardDenyReason.PAGE_NOT_ALLOWED)
-+        val rect = context.targetRect ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
-+        if (context.expectedPagesAfter.isEmpty()) return deny(GuardDenyReason.POSTCONDITION_MISSING)
-+        if (intent.riskLevel == RiskLevel.SENSITIVE) {
-+            if (context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
-+            if (context.dailyAlreadySuccess) return deny(GuardDenyReason.DAILY_ALREADY_SUCCESS)
-+            if (context.purchaseSignalPresent) return deny(GuardDenyReason.PURCHASE_SIGNAL_PRESENT)
-+        }
-+        val plan = ActionPlan(
-+            intent,
-+            rect,
-+            ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
-+            page.pageId,
-+            context.expectedPagesAfter,
-+            5_000L,
-+        )
-+        return GuardDecision.AllowDryRun(plan, listOf("ALL_PRECONDITIONS_CONFIRMED", "DRY_RUN_ONLY"))
-+    }
-+}
+@@ -10,7 +10,7 @@ import com.lidquan.yishigame.vision.StablePage
+
+ enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
+ enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
+-enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
++enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
+
+ data class ActionIntent(val type: ActionType, val targetId: String? = null, val riskLevel: RiskLevel)
+ data class ActionPlan(
+@@ -31,6 +31,9 @@ data class ActionContext(
+     val windowGate: WindowGate,
+     val viewportValid: Boolean,
+     val stablePage: StablePage?,
++    val currentViewportVersion: Long,
++    val now: Long,
++    val maxStablePageAgeMs: Long = 2_000L,
+     val allowedPages: Set<String>,
+     val targetRect: WindowBounds?,
+     val expectedPagesAfter: Set<String>,
+@@ -56,6 +59,8 @@ object ActionGuard {
+         if (context.windowGate != WindowGate.MATCHED) return deny(GuardDenyReason.WINDOW_NOT_MATCHED)
+         if (!context.viewportValid) return deny(GuardDenyReason.VIEWPORT_INVALID)
+         val page = context.stablePage ?: return deny(GuardDenyReason.PAGE_NOT_STABLE)
++        if (page.viewportVersion != context.currentViewportVersion) return deny(GuardDenyReason.PAGE_VIEWPORT_MISMATCH)
++        if (context.now < page.observedAt || context.now - page.observedAt > context.maxStablePageAgeMs) return deny(GuardDenyReason.PAGE_STALE)
+         if (page.pageId !in context.allowedPages) return deny(GuardDenyReason.PAGE_NOT_ALLOWED)
+         val rect = context.targetRect ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
+         if (context.expectedPagesAfter.isEmpty()) return deny(GuardDenyReason.POSTCONDITION_MISSING)
 diff --git a/app/src/main/java/com/lidquan/yishigame/automation/WindowMonitor.kt b/app/src/main/java/com/lidquan/yishigame/automation/WindowMonitor.kt
-index 9443fec..f4a504a 100644
+index f4a504a..f910bc0 100644
 --- a/app/src/main/java/com/lidquan/yishigame/automation/WindowMonitor.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/automation/WindowMonitor.kt
-@@ -10,6 +10,8 @@ enum class WindowGate { NO_BASELINE, MATCHED, CHANGED, UNAVAILABLE }
+@@ -10,24 +10,33 @@ enum class WindowGate { NO_BASELINE, MATCHED, CHANGED, UNAVAILABLE }
 
  class WindowMonitor {
      private var acceptedBounds: WindowBounds? = null
-+    var version: Long = 0
-+        private set
++    private var lastGate: WindowGate? = null
+     var version: Long = 0
+         private set
 
      fun observe(bounds: WindowBounds?): WindowGate {
-         if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
-@@ -20,10 +22,12 @@ class WindowMonitor {
+-        if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
+-        val baseline = acceptedBounds ?: return WindowGate.NO_BASELINE
+-        return if (bounds == baseline) WindowGate.MATCHED else WindowGate.CHANGED
++        val gate = when {
++            bounds?.isValid != true -> WindowGate.UNAVAILABLE
++            acceptedBounds == null -> WindowGate.NO_BASELINE
++            bounds == acceptedBounds -> WindowGate.MATCHED
++            else -> WindowGate.CHANGED
++        }
++        if (gate != lastGate && gate in setOf(WindowGate.CHANGED, WindowGate.UNAVAILABLE)) version += 1
++        lastGate = gate
++        return gate
+     }
+
      fun accept(bounds: WindowBounds?): WindowGate {
          if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
          acceptedBounds = bounds
-+        version += 1
+         version += 1
++        lastGate = WindowGate.MATCHED
          return WindowGate.MATCHED
      }
 
      fun clear() {
          acceptedBounds = null
-+        version += 1
+         version += 1
++        lastGate = null
      }
  }
-diff --git a/app/src/main/java/com/lidquan/yishigame/capture/FrameStore.kt b/app/src/main/java/com/lidquan/yishigame/capture/FrameStore.kt
-new file mode 100644
-index 0000000..2967203
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/capture/FrameStore.kt
-@@ -0,0 +1,69 @@
-+package com.lidquan.yishigame.capture
-+
-+import java.nio.ByteBuffer
-+import java.util.concurrent.atomic.AtomicLong
-+import kotlinx.coroutines.flow.MutableStateFlow
-+import kotlinx.coroutines.flow.StateFlow
-+import kotlinx.coroutines.flow.asStateFlow
-+
-+data class FrameMetadata(
-+    val frameId: Long = 0,
-+    val timestampNanos: Long = 0,
-+    val width: Int = 0,
-+    val height: Int = 0,
-+    val captureFps: Float = 0f,
-+)
-+
-+data class ScreenFrameSnapshot(
-+    val frameId: Long,
-+    val width: Int,
-+    val height: Int,
-+    val rowStride: Int,
-+    val pixelStride: Int,
-+    val timestampNanos: Long,
-+    val rgba: ByteArray,
-+)
-+
-+interface FrameStore {
-+    val metadata: StateFlow<FrameMetadata>
-+    fun latestSnapshot(): ScreenFrameSnapshot?
-+}
-+
-+class LatestFrameStore : FrameStore {
-+    private val nextId = AtomicLong()
-+    private val mutableMetadata = MutableStateFlow(FrameMetadata())
-+    override val metadata: StateFlow<FrameMetadata> = mutableMetadata.asStateFlow()
-+    private var bytes = ByteArray(0)
-+    private var snapshotHeader: ScreenFrameSnapshot? = null
-+    private var firstTimestamp = 0L
-+
-+    @Synchronized
-+    fun publish(
-+        width: Int,
-+        height: Int,
-+        rowStride: Int,
-+        pixelStride: Int,
-+        timestampNanos: Long,
-+        source: ByteBuffer,
-+    ) {
-+        val size = source.remaining()
-+        if (bytes.size != size) bytes = ByteArray(size)
-+        source.get(bytes)
-+        val id = nextId.incrementAndGet()
-+        if (firstTimestamp == 0L) firstTimestamp = timestampNanos
-+        val elapsedSeconds = (timestampNanos - firstTimestamp).coerceAtLeast(1L) / 1_000_000_000f
-+        snapshotHeader = ScreenFrameSnapshot(id, width, height, rowStride, pixelStride, timestampNanos, ByteArray(0))
-+        mutableMetadata.value = FrameMetadata(id, timestampNanos, width, height, (id - 1) / elapsedSeconds)
-+    }
-+
-+    @Synchronized
-+    override fun latestSnapshot(): ScreenFrameSnapshot? = snapshotHeader?.copy(rgba = bytes.copyOf())
-+
-+    @Synchronized
-+    fun clear() {
-+        bytes = ByteArray(0)
-+        snapshotHeader = null
-+        firstTimestamp = 0L
-+        mutableMetadata.value = FrameMetadata()
-+    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/capture/MediaProjectionCaptureService.kt b/app/src/main/java/com/lidquan/yishigame/capture/MediaProjectionCaptureService.kt
-index e6553a6..e648f8c 100644
---- a/app/src/main/java/com/lidquan/yishigame/capture/MediaProjectionCaptureService.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/capture/MediaProjectionCaptureService.kt
-@@ -72,7 +72,7 @@ class MediaProjectionCaptureService : Service() {
-         if (projection != null) return START_NOT_STICKY
-         closed = false
-         frameCount = 0
--        mutableLatestFrame.value = null
-+        frameStore.clear()
-         mutableState.value = ScreenCaptureState.Capturing
-         startCapture(resultCode, resultData)
-         return START_NOT_STICKY
-@@ -106,13 +106,13 @@ class MediaProjectionCaptureService : Service() {
-                 val plane = image.planes.first()
-                 lastFrameTimestampNanos = image.timestamp
-                 frameCount += 1
--                mutableLatestFrame.value = copyScreenFrame(
-+                frameStore.publish(
-                     width = image.width,
-                     height = image.height,
-                     rowStride = plane.rowStride,
-                     pixelStride = plane.pixelStride,
-                     timestampNanos = image.timestamp,
--                    buffer = plane.buffer,
-+                    source = plane.buffer,
-                 )
-                 mutableState.value = ScreenCaptureState.Active(width, height, frameCount)
-             } finally {
-@@ -130,7 +130,7 @@ class MediaProjectionCaptureService : Service() {
-             null,
-             handler,
-         )
--        handler?.postDelayed({ if (mutableLatestFrame.value == null) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
-+        handler?.postDelayed({ if (frameStore.metadata.value.frameId == 0L) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
-     }
-
-     @Synchronized
-@@ -143,7 +143,7 @@ class MediaProjectionCaptureService : Service() {
-         if (closed) return
-         closed = true
-         mutableState.value = finalState
--        mutableLatestFrame.value = null
-+        frameStore.clear()
-         releaseResources()
-         stopForeground(STOP_FOREGROUND_REMOVE)
-         stopSelf()
-@@ -168,7 +168,7 @@ class MediaProjectionCaptureService : Service() {
-             if (mutableState.value !is ScreenCaptureState.Stopped) {
-                 mutableState.value = ScreenCaptureState.Stopped("SERVICE_DESTROYED")
-             }
--            mutableLatestFrame.value = null
-+            frameStore.clear()
-             releaseResources()
-         }
-         super.onDestroy()
-@@ -194,16 +194,15 @@ class MediaProjectionCaptureService : Service() {
-
-         private val mutableState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.NotRequested)
-         val state: StateFlow<ScreenCaptureState> = mutableState.asStateFlow()
--        private val mutableLatestFrame = MutableStateFlow<ScreenFrame?>(null)
--        val latestFrame: StateFlow<ScreenFrame?> = mutableLatestFrame.asStateFlow()
-+        val frameStore = LatestFrameStore()
-
-         fun markDenied() {
--            mutableLatestFrame.value = null
-+            frameStore.clear()
-             mutableState.value = ScreenCaptureState.PermissionDenied
-         }
-
-         fun stop(context: Context) {
--            mutableLatestFrame.value = null
-+            frameStore.clear()
-             mutableState.value = ScreenCaptureState.Stopped("USER_STOPPED")
-             context.stopService(Intent(context, MediaProjectionCaptureService::class.java))
-         }
-diff --git a/app/src/main/java/com/lidquan/yishigame/capture/ScreenCaptureController.kt b/app/src/main/java/com/lidquan/yishigame/capture/ScreenCaptureController.kt
-index 6befc31..c6a8dd1 100644
---- a/app/src/main/java/com/lidquan/yishigame/capture/ScreenCaptureController.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/capture/ScreenCaptureController.kt
-@@ -27,7 +27,7 @@ sealed interface ScreenCaptureState {
-
- interface ScreenCaptureController {
-     val state: StateFlow<ScreenCaptureState>
--    val latestFrame: StateFlow<ScreenFrame?>
-+    val frameStore: FrameStore
-     fun permissionIntent(): Intent
-     fun handlePermissionResult(resultCode: Int, data: Intent?)
-     fun stop()
-@@ -37,7 +37,7 @@ class MediaProjectionScreenCaptureController(private val context: Context) : Scr
-     private val projectionManager = context.getSystemService(MediaProjectionManager::class.java)
-
-     override val state: StateFlow<ScreenCaptureState> = MediaProjectionCaptureService.state
--    override val latestFrame: StateFlow<ScreenFrame?> = MediaProjectionCaptureService.latestFrame
-+    override val frameStore: FrameStore = MediaProjectionCaptureService.frameStore
-
-     override fun permissionIntent(): Intent = projectionManager.createScreenCaptureIntent()
-
 diff --git a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
-index 3a84c55..b957959 100644
+index b957959..9ecd88d 100644
 --- a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
-@@ -33,6 +33,8 @@ import com.lidquan.yishigame.MainViewModel
- import com.lidquan.yishigame.automation.AutomationState
- import com.lidquan.yishigame.automation.RecoveryRequirement
- import com.lidquan.yishigame.capture.ScreenCaptureState
-+import com.lidquan.yishigame.vision.PageDetection
-+import com.lidquan.yishigame.action.GuardDecision
-
- @Composable
- fun AssistantApp(
-@@ -42,6 +44,7 @@ fun AssistantApp(
- ) {
-     val state by viewModel.uiState.collectAsState()
-     var showDiagnostics by remember { mutableStateOf(false) }
-+    var showVision by remember { mutableStateOf(false) }
-
-     MaterialTheme {
-         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
-@@ -56,6 +59,7 @@ fun AssistantApp(
-                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                             onRequestCapture = onRequestCapture,
-                             onShowDiagnostics = { showDiagnostics = true },
-+                            onShowVision = { showVision = true },
-                         )
+@@ -116,8 +116,8 @@ fun AssistantApp(
+                     StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
+                     StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
+                     StatusRow("Action Guard", guardLabel(state.dryRunDecision))
+-                    Button(onClick = viewModel::evaluateOpenSettingsDryRun, modifier = Modifier.fillMaxWidth()) {
+-                        Text("评估 OPEN_SETTINGS Dry-Run")
++                    Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
++                        Text("评估 DUNGEON_LIST 锚点 Dry-Run")
                      }
-                 } else {
-@@ -71,6 +75,7 @@ fun AssistantApp(
-                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                             onRequestCapture = onRequestCapture,
-                             onShowDiagnostics = { showDiagnostics = true },
-+                            onShowVision = { showVision = true },
-                         )
-                     }
+                     Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
                  }
-@@ -94,6 +99,31 @@ fun AssistantApp(
-             },
-         )
-     }
-+    if (showVision) {
-+        AlertDialog(
-+            onDismissRequest = { showVision = false },
-+            confirmButton = { TextButton(onClick = { showVision = false }) { Text("关闭") } },
-+            title = { Text("Vision Debug（只读）") },
-+            text = {
-+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-+                    StatusRow("Viewport", state.windowBounds?.let { "${it.left},${it.top} · ${it.width}×${it.height}" } ?: "未确认")
-+                    StatusRow("WindowGate", state.windowGate.name)
-+                    StatusRow("Frame", "#${state.frameMetadata.frameId} · %.1f capture FPS".format(state.frameMetadata.captureFps))
-+                    StatusRow("Vision", "%.1f FPS · ${state.visionMetrics.lastVisionDurationMs} ms".format(state.visionMetrics.visionFps))
-+                    StatusRow("P95", "${state.visionMetrics.p95VisionDurationMs} ms")
-+                    StatusRow("OCR / Page", "${state.visionMetrics.ocrDurationMs} / ${state.visionMetrics.pageDetectorDurationMs} ms")
-+                    StatusRow("Detection", detectionLabel(state.visionMetrics.pageDetection))
-+                    StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
-+                    StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
-+                    StatusRow("Action Guard", guardLabel(state.dryRunDecision))
-+                    Button(onClick = viewModel::evaluateOpenSettingsDryRun, modifier = Modifier.fillMaxWidth()) {
-+                        Text("评估 OPEN_SETTINGS Dry-Run")
-+                    }
-+                    Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
-+                }
-+            },
-+        )
-+    }
- }
-
- @Composable
-@@ -101,11 +131,11 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
-     Card(modifier = modifier) {
-         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-             Text("异世界勇者自动化助手", style = MaterialTheme.typography.headlineMedium)
--            Text("M0 基础设施验证版，不执行游戏自动点击。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-+            Text("M1 视觉基础设施验证版，只识别与 Dry-Run，不执行游戏输入。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-             StatusRow("当前状态", state.automationState.name)
-             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
-             StatusRow("屏幕采集", captureLabel(state.captureState))
--            StatusRow("最新帧", state.latestFrameBytes.takeIf { it > 0 }?.let { "$it 字节" } ?: "无")
-+            StatusRow("Frame", state.frameMetadata.frameId.takeIf { it > 0 }?.let { "#$it · %.1f FPS".format(state.frameMetadata.captureFps) } ?: "无")
-             StatusRow(
-                 "目标游戏",
-                 when {
-@@ -128,6 +158,7 @@ private fun Controls(
-     onOpenAccessibilitySettings: () -> Unit,
-     onRequestCapture: () -> Unit,
-     onShowDiagnostics: () -> Unit,
-+    onShowVision: () -> Unit,
- ) {
-     Card(modifier = modifier) {
-         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-@@ -169,10 +200,23 @@ private fun Controls(
-             }
-             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
-             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
-+            TextButton(onClick = onShowVision, modifier = Modifier.fillMaxWidth()) { Text("Vision Debug（只读）") }
-         }
-     }
- }
-
-+private fun detectionLabel(detection: PageDetection): String = when (detection) {
-+    is PageDetection.Matched -> "MATCHED ${detection.pageId} · %.3f".format(detection.confidence)
-+    is PageDetection.Ambiguous -> "AMBIGUOUS · ${detection.candidates.joinToString { it.pageId }}"
-+    is PageDetection.Unknown -> "UNKNOWN"
-+}
-+
-+private fun guardLabel(decision: GuardDecision?): String = when (decision) {
-+    null -> "未评估"
-+    is GuardDecision.AllowDryRun -> "ALLOW_DRY_RUN（不会执行）"
-+    is GuardDecision.Deny -> "DENY · ${decision.reason}"
-+}
-+
- @Composable
- private fun StatusRow(label: String, value: String) {
-     Column {
 diff --git a/app/src/main/java/com/lidquan/yishigame/viewport/ViewportMapper.kt b/app/src/main/java/com/lidquan/yishigame/viewport/ViewportMapper.kt
-new file mode 100644
-index 0000000..4016c28
---- /dev/null
+index 4016c28..93af214 100644
+--- a/app/src/main/java/com/lidquan/yishigame/viewport/ViewportMapper.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/viewport/ViewportMapper.kt
-@@ -0,0 +1,29 @@
-+package com.lidquan.yishigame.viewport
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+
-+data class NormalizedRect(val left: Float, val top: Float, val right: Float, val bottom: Float) {
-+    init {
-+        require(left in 0f..1f && top in 0f..1f && right in 0f..1f && bottom in 0f..1f)
-+        require(left < right && top < bottom)
-+    }
+@@ -11,6 +11,17 @@ data class NormalizedRect(val left: Float, val top: Float, val right: Float, val
+
+ data class ScreenPoint(val x: Int, val y: Int)
+
++data class WindowGeometry(
++    val windowBounds: WindowBounds,
++    val contentViewport: WindowBounds,
++    val profileVersion: Long,
++) {
++    val isConfirmed: Boolean get() =
++        profileVersion > 0 && windowBounds.isValid && contentViewport.isValid &&
++            contentViewport.left >= windowBounds.left && contentViewport.top >= windowBounds.top &&
++            contentViewport.right <= windowBounds.right && contentViewport.bottom <= windowBounds.bottom
 +}
 +
-+data class ScreenPoint(val x: Int, val y: Int)
+ object ViewportMapper {
+     fun toScreen(rect: NormalizedRect, viewport: WindowBounds): WindowBounds {
+         require(viewport.isValid)
+diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
+index 259b73d..fddbc80 100644
+--- a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
++++ b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
+@@ -9,6 +9,9 @@ import com.lidquan.yishigame.vision.ocr.freeAttemptState
+ import com.lidquan.yishigame.vision.page.PageDefinition
+ import com.lidquan.yishigame.vision.page.PageDetector
+ import com.lidquan.yishigame.vision.page.SignalRule
++import com.lidquan.yishigame.vision.template.RgbaTemplate
++import com.lidquan.yishigame.vision.template.TemplateDefinition
++import com.lidquan.yishigame.vision.template.TemplateMatcher
+
+ data class OcrSignalDefinition(
+     val id: String,
+@@ -16,12 +19,27 @@ data class OcrSignalDefinition(
+     val expectedText: String,
+ )
+
++enum class SemanticOcrSignalType { FREE_ATTEMPT }
 +
-+object ViewportMapper {
-+    fun toScreen(rect: NormalizedRect, viewport: WindowBounds): WindowBounds {
-+        require(viewport.isValid)
-+        return WindowBounds(
-+            viewport.left + (viewport.width * rect.left).toInt(),
-+            viewport.top + (viewport.height * rect.top).toInt(),
-+            viewport.left + (viewport.width * rect.right).toInt(),
-+            viewport.top + (viewport.height * rect.bottom).toInt(),
++data class SemanticOcrSignalDefinition(
++    val id: String,
++    val roi: NormalizedRect,
++    val type: SemanticOcrSignalType,
++)
++
++data class TemplateSignalDefinition(
++    val definition: TemplateDefinition,
++    val template: RgbaTemplate,
++)
++
+ data class VisionConfiguration(
+     val schemaVersion: Int,
+     val templateSetVersion: String,
+     val pageDefinitionVersion: String,
+     val ocrSignals: List<OcrSignalDefinition>,
+     val pages: List<PageDefinition>,
++    val semanticOcrSignals: List<SemanticOcrSignalDefinition> = emptyList(),
++    val templateSignals: List<TemplateSignalDefinition> = emptyList(),
+ )
+
+ class ConfiguredVisionEngine(
+@@ -48,6 +66,18 @@ class ConfiguredVisionEngine(
+             } else {
+                 null
+             }
++        }.toMutableList<VisionEvidence>()
++        configuration.semanticOcrSignals.forEach { signal ->
++            val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
++            val started = System.nanoTime()
++            rawOcr += runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
++            ocrNanos += System.nanoTime() - started
++        }
++        var templateNanos = 0L
++        configuration.templateSignals.forEach { signal ->
++            val started = System.nanoTime()
++            TemplateMatcher.match(signal.definition, frame, currentViewport, signal.template)?.let(evidence::add)
++            templateNanos += System.nanoTime() - started
+         }
+         val freeState = freeAttemptState(rawOcr)
+         val detectorStarted = System.nanoTime()
+@@ -56,6 +86,7 @@ class ConfiguredVisionEngine(
+         return VisionAnalysis(
+             detection = detection,
+             freeAttemptState = freeState,
++            templateDurationMs = templateNanos / 1_000_000L,
+             ocrDurationMs = ocrNanos / 1_000_000L,
+             pageDetectorDurationMs = detectorMs,
+         )
+diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+index bb7e2a7..7693893 100644
+--- a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
++++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+@@ -39,6 +39,7 @@ data class StablePage(
+     val confidence: Float,
+     val observedAt: Long,
+     val viewportVersion: Long,
++    val anchors: Map<String, WindowBounds> = emptyMap(),
+ )
+
+ data class VisionMetrics(
+diff --git a/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt b/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt
+index 0149017..13f76f1 100644
+--- a/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt
++++ b/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt
+@@ -60,10 +60,16 @@ class StablePageTracker(private val windowSize: Int = 3, private val requiredMat
+         }
+         history.addLast(detection)
+         while (history.size > windowSize) history.removeFirst()
+-        val matches = history.filterIsInstance<PageDetection.Matched>()
+-        val group = matches.groupBy { it.pageId }.maxByOrNull { it.value.size } ?: return null
+-        if (group.value.size < requiredMatches) return null
+-        return StablePage(group.key, group.value.map { it.confidence }.average().toFloat(), observedAt, viewportVersion)
++        val latest = history.lastOrNull() as? PageDetection.Matched ?: return null
++        val samePage = history.filterIsInstance<PageDetection.Matched>().filter { it.pageId == latest.pageId }
++        if (samePage.size < requiredMatches) return null
++        return StablePage(
++            latest.pageId,
++            samePage.map { it.confidence }.average().toFloat(),
++            observedAt,
++            viewportVersion,
++            latest.evidences.associate { it.id to it.rect },
++        )
+     }
+
+     fun clear() {
+diff --git a/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
+index da4124e..14d7497 100644
+--- a/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
++++ b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
+@@ -3,6 +3,7 @@ package com.lidquan.yishigame.vision.template
+ import com.lidquan.yishigame.automation.WindowBounds
+ import com.lidquan.yishigame.capture.ScreenFrameSnapshot
+ import com.lidquan.yishigame.viewport.NormalizedRect
++import com.lidquan.yishigame.viewport.ViewportMapper
+ import com.lidquan.yishigame.vision.TemplateEvidence
+
+ data class TemplateDefinition(
+@@ -12,11 +13,26 @@ data class TemplateDefinition(
+     val roi: NormalizedRect,
+     val threshold: Float,
+     val negative: Boolean = false,
++    val scalePolicy: ScalePolicy = ScalePolicy.FIXED,
+ )
+
++enum class ScalePolicy { FIXED }
++
+ data class RgbaTemplate(val width: Int, val height: Int, val rgba: ByteArray)
+
+ object TemplateMatcher {
++    fun match(
++        definition: TemplateDefinition,
++        frame: ScreenFrameSnapshot,
++        viewport: WindowBounds,
++        template: RgbaTemplate,
++    ): TemplateEvidence? {
++        require(definition.scalePolicy == ScalePolicy.FIXED)
++        val rect = ViewportMapper.toScreen(definition.roi, viewport)
++        val evidence = compare(definition.id, crop(frame, rect), template, rect) ?: return null
++        return evidence.takeIf { it.confidence >= definition.threshold }
++    }
++
+     fun compare(id: String, candidate: RgbaTemplate, template: RgbaTemplate, rect: WindowBounds): TemplateEvidence? {
+         if (candidate.width != template.width || candidate.height != template.height || candidate.rgba.size != template.rgba.size) return null
+         if (candidate.rgba.isEmpty()) return null
+diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
+index c06547e..c95beee 100644
+--- a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
+@@ -12,9 +12,20 @@ import org.junit.Test
+
+ class ActionGuardTest {
+     private val safe = ActionContext(
+-        AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
+-        WindowGate.MATCHED, true, StablePage("DUNGEON_DETAIL", .96f, 1, 1), setOf("DUNGEON_DETAIL"),
+-        WindowBounds(10, 10, 20, 20), setOf("LOADING"), FreeAttemptState.AVAILABLE,
++        automationState = AutomationState.RUNNING_PLACEHOLDER,
++        accessibilityConnected = true,
++        captureState = ScreenCaptureState.Active(1, 1, 1),
++        targetVisible = true,
++        targetActive = true,
++        windowGate = WindowGate.MATCHED,
++        viewportValid = true,
++        stablePage = StablePage("DUNGEON_DETAIL", .96f, 1_000, 1),
++        currentViewportVersion = 1,
++        now = 1_500,
++        allowedPages = setOf("DUNGEON_DETAIL"),
++        targetRect = WindowBounds(10, 10, 20, 20),
++        expectedPagesAfter = setOf("LOADING"),
++        freeAttemptState = FreeAttemptState.AVAILABLE,
+     )
+
+     @Test fun `guard only allows dry run when every gate is confirmed`() {
+@@ -30,4 +41,10 @@ class ActionGuardTest {
+         val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE, riskLevel = RiskLevel.FORBIDDEN_AUTO), safe) as GuardDecision.Deny
+         assertEquals(GuardDenyReason.FORBIDDEN_AUTO, decision.reason)
+     }
++
++    @Test fun `stale or mismatched page is denied`() {
++        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
++        assertEquals(GuardDenyReason.PAGE_VIEWPORT_MISMATCH, (ActionGuard.plan(intent, safe.copy(currentViewportVersion = 2)) as GuardDecision.Deny).reason)
++        assertEquals(GuardDenyReason.PAGE_STALE, (ActionGuard.plan(intent, safe.copy(now = 4_000)) as GuardDecision.Deny).reason)
++    }
+ }
+diff --git a/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt b/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt
+index a00abb6..3687741 100644
+--- a/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt
+@@ -2,6 +2,7 @@ package com.lidquan.yishigame.viewport
+
+ import com.lidquan.yishigame.automation.WindowBounds
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
+ import org.junit.Test
+
+ class ViewportMapperTest {
+@@ -10,4 +11,18 @@ class ViewportMapperTest {
+         assertEquals(WindowBounds(150, 90, 250, 210), ViewportMapper.toScreen(roi, WindowBounds(100, 50, 300, 250)))
+         assertEquals(WindowBounds(300, 180, 500, 420), ViewportMapper.toScreen(roi, WindowBounds(200, 100, 600, 500)))
+     }
++
++
++    @Test fun `content viewport remains separate from decorated window`() {
++        val geometry = WindowGeometry(
++            windowBounds = WindowBounds(90, 0, 1130, 1740),
++            contentViewport = WindowBounds(100, 30, 1120, 1730),
++            profileVersion = 1,
++        )
++        assertTrue(geometry.isConfirmed)
++        assertEquals(
++            WindowBounds(100, 30, 610, 880),
++            ViewportMapper.toScreen(NormalizedRect(0f, 0f, .5f, .5f), geometry.contentViewport),
 +        )
 +    }
+ }
+diff --git a/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt
+index 572b77f..f2cbe25 100644
+--- a/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt
+@@ -30,4 +30,19 @@ class PageDetectorTest {
+         assertEquals("MAIN", tracker.add(match, 1, 2)?.pageId)
+         assertNull(tracker.add(match, 2, 3))
+     }
 +
-+    fun pointToScreen(x: Float, y: Float, viewport: WindowBounds): ScreenPoint {
-+        require(x in 0f..1f && y in 0f..1f && viewport.isValid)
-+        return ScreenPoint(viewport.left + (viewport.width * x).toInt(), viewport.top + (viewport.height * y).toInt())
++    @Test fun `latest unknown ambiguous or different page is never actionable`() {
++        val main = PageDetection.Matched("MAIN", .95f, emptyList())
++        val other = PageDetection.Matched("OTHER", .95f, emptyList())
++        listOf<PageDetection>(
++            PageDetection.Unknown(emptyList()),
++            PageDetection.Ambiguous(emptyList()),
++            other,
++        ).forEach { latest ->
++            val tracker = StablePageTracker(3, 2)
++            tracker.add(main, 1, 1)
++            tracker.add(main, 1, 2)
++            assertNull(tracker.add(latest, 1, 3))
++        }
 +    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-new file mode 100644
-index 0000000..259b73d
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-@@ -0,0 +1,92 @@
-+package com.lidquan.yishigame.vision
-+
-+import com.lidquan.yishigame.automation.WindowBounds
+ }
+diff --git a/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
+index e9734cd..d420d4e 100644
+--- a/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
+@@ -1,6 +1,12 @@
+ package com.lidquan.yishigame.vision.template
+
+ import com.lidquan.yishigame.automation.WindowBounds
 +import com.lidquan.yishigame.capture.ScreenFrameSnapshot
 +import com.lidquan.yishigame.viewport.NormalizedRect
-+import com.lidquan.yishigame.viewport.ViewportMapper
-+import com.lidquan.yishigame.vision.ocr.OcrEngine
-+import com.lidquan.yishigame.vision.ocr.freeAttemptState
++import com.lidquan.yishigame.vision.PageDetection
 +import com.lidquan.yishigame.vision.page.PageDefinition
 +import com.lidquan.yishigame.vision.page.PageDetector
 +import com.lidquan.yishigame.vision.page.SignalRule
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+@@ -14,4 +20,17 @@ class TemplateMatcherTest {
+         assertEquals(1f, exact.confidence)
+         assertTrue(different.confidence < .9f)
+     }
 +
-+data class OcrSignalDefinition(
-+    val id: String,
-+    val roi: NormalizedRect,
-+    val expectedText: String,
-+)
 +
-+data class VisionConfiguration(
-+    val schemaVersion: Int,
-+    val templateSetVersion: String,
-+    val pageDefinitionVersion: String,
-+    val ocrSignals: List<OcrSignalDefinition>,
-+    val pages: List<PageDefinition>,
-+)
-+
-+class ConfiguredVisionEngine(
-+    private val ocr: OcrEngine,
-+    private val viewport: () -> WindowBounds?,
-+    private val configuration: VisionConfiguration = initialVisionConfiguration(),
-+) : AutoCloseable {
-+    private val detector = PageDetector(configuration.pages)
-+
-+    suspend fun analyze(frame: ScreenFrameSnapshot): VisionAnalysis {
-+        val currentViewport = viewport()?.takeIf { it.isValid && it.right <= frame.width && it.bottom <= frame.height }
-+            ?: return VisionAnalysis(PageDetection.Unknown(emptyList()), FreeAttemptState.UNKNOWN)
-+        val rawOcr = mutableListOf<OcrEvidence>()
-+        var ocrNanos = 0L
-+        val evidence = configuration.ocrSignals.mapNotNull { signal ->
-+            val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
-+            val ocrStarted = System.nanoTime()
-+            val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
-+            ocrNanos += System.nanoTime() - ocrStarted
-+            rawOcr += lines
-+            val normalized = lines.joinToString(separator = "") { it.normalizedText }
-+            if (signal.expectedText in normalized) {
-+                OcrEvidence(signal.id, normalized, normalized, 0.9f, roi)
-+            } else {
-+                null
-+            }
-+        }
-+        val freeState = freeAttemptState(rawOcr)
-+        val detectorStarted = System.nanoTime()
-+        val detection = detector.detect(evidence)
-+        val detectorMs = (System.nanoTime() - detectorStarted) / 1_000_000L
-+        return VisionAnalysis(
-+            detection = detection,
-+            freeAttemptState = freeState,
-+            ocrDurationMs = ocrNanos / 1_000_000L,
-+            pageDetectorDurationMs = detectorMs,
-+        )
++    @Test fun `definition roi threshold and negative evidence feed page detector`() {
++        val frame = ScreenFrameSnapshot(1, 2, 1, 8, 4, 1, byteArrayOf(1, 2, 3, 4, 9, 8, 7, 6))
++        val viewport = WindowBounds(0, 0, 2, 1)
++        val required = TemplateDefinition("required", 1, "PAGE", NormalizedRect(0f, 0f, .5f, 1f), .99f)
++        val negative = TemplateDefinition("negative", 1, "PAGE", NormalizedRect(.5f, 0f, 1f, 1f), .99f, negative = true)
++        val requiredEvidence = TemplateMatcher.match(required, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(1, 2, 3, 4)))!!
++        val negativeEvidence = TemplateMatcher.match(negative, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(9, 8, 7, 6)))!!
++        val detector = PageDetector(listOf(PageDefinition("PAGE", 1, listOf(SignalRule("required", .99f)), negative = listOf(SignalRule("negative", .99f)), threshold = .99f, minimumMargin = .01f)))
++        assertEquals("PAGE", (detector.detect(listOf(requiredEvidence)) as PageDetection.Matched).pageId)
++        assertTrue(detector.detect(listOf(requiredEvidence, negativeEvidence)) is PageDetection.Unknown)
 +    }
-+
-+    override fun close() {
-+        (ocr as? AutoCloseable)?.close()
-+    }
-+}
-+
-+fun initialVisionConfiguration(): VisionConfiguration {
-+    val signals = listOf(
-+        OcrSignalDefinition("settings.title", NormalizedRect(0.25f, 0.05f, 0.75f, 0.15f), "设置"),
-+        OcrSignalDefinition("settings.anchor", NormalizedRect(0.15f, 0.47f, 0.85f, 0.56f), "自动回收"),
-+        OcrSignalDefinition("character.title", NormalizedRect(0.27f, 0.13f, 0.65f, 0.22f), "选择角色"),
-+        OcrSignalDefinition("character.anchor", NormalizedRect(0.28f, 0.42f, 0.62f, 0.52f), "进入游戏"),
-+        OcrSignalDefinition("dungeon.title", NormalizedRect(0.23f, 0.29f, 0.78f, 0.38f), "地下城"),
-+        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域"),
-+    )
-+    fun page(id: String, prefix: String) = PageDefinition(
-+        pageId = id,
-+        version = 1,
-+        required = listOf(SignalRule("$prefix.title", 0.8f), SignalRule("$prefix.anchor", 0.8f)),
-+        threshold = 0.85f,
-+        minimumMargin = 0.1f,
-+    )
-+    return VisionConfiguration(
-+        schemaVersion = 1,
-+        templateSetVersion = "m1-local-private-v1",
-+        pageDefinitionVersion = "m1-pages-v1",
-+        ocrSignals = signals,
-+        pages = listOf(page("SETTINGS", "settings"), page("CHARACTER_SELECT", "character"), page("DUNGEON_LIST", "dungeon")),
-+    )
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+ }
+diff --git a/config/content-viewport.example.json b/config/content-viewport.example.json
 new file mode 100644
-index 0000000..bb7e2a7
+index 0000000..e43eedb
 --- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-@@ -0,0 +1,55 @@
-+package com.lidquan.yishigame.vision
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+
-+sealed interface VisionEvidence {
-+    val id: String
-+    val confidence: Float
-+    val rect: WindowBounds
-+}
-+
-+data class TemplateEvidence(
-+    override val id: String,
-+    override val confidence: Float,
-+    override val rect: WindowBounds,
-+) : VisionEvidence
-+
-+data class OcrEvidence(
-+    override val id: String,
-+    val text: String,
-+    val normalizedText: String,
-+    val reportedConfidence: Float?,
-+    override val rect: WindowBounds,
-+) : VisionEvidence {
-+    override val confidence: Float get() = reportedConfidence ?: 0.5f
-+}
-+
-+enum class FreeAttemptState { AVAILABLE, EXHAUSTED, UNKNOWN }
-+
-+data class PageCandidate(val pageId: String, val confidence: Float, val evidences: List<VisionEvidence>)
-+
-+sealed interface PageDetection {
-+    data class Matched(val pageId: String, val confidence: Float, val evidences: List<VisionEvidence>) : PageDetection
-+    data class Ambiguous(val candidates: List<PageCandidate>) : PageDetection
-+    data class Unknown(val evidences: List<VisionEvidence>) : PageDetection
-+}
-+
-+data class StablePage(
-+    val pageId: String,
-+    val confidence: Float,
-+    val observedAt: Long,
-+    val viewportVersion: Long,
-+)
-+
-+data class VisionMetrics(
-+    val frameId: Long = 0,
-+    val visionFps: Float = 0f,
-+    val lastVisionDurationMs: Long = 0,
-+    val p95VisionDurationMs: Long = 0,
-+    val templateDurationMs: Long = 0,
-+    val ocrDurationMs: Long = 0,
-+    val pageDetectorDurationMs: Long = 0,
-+    val pageDetection: PageDetection = PageDetection.Unknown(emptyList()),
-+    val stablePage: StablePage? = null,
-+    val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
-+)
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-new file mode 100644
-index 0000000..f25be0f
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-@@ -0,0 +1,87 @@
-+package com.lidquan.yishigame.vision
-+
-+import com.lidquan.yishigame.capture.FrameStore
-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
-+import com.lidquan.yishigame.vision.page.StablePageTracker
-+import kotlinx.coroutines.CoroutineScope
-+import kotlinx.coroutines.Dispatchers
-+import kotlinx.coroutines.Job
-+import kotlinx.coroutines.delay
-+import kotlinx.coroutines.flow.MutableStateFlow
-+import kotlinx.coroutines.flow.StateFlow
-+import kotlinx.coroutines.flow.asStateFlow
-+import kotlinx.coroutines.isActive
-+import kotlinx.coroutines.launch
-+import kotlinx.coroutines.withContext
-+
-+data class VisionAnalysis(
-+    val detection: PageDetection,
-+    val freeAttemptState: FreeAttemptState,
-+    val templateDurationMs: Long = 0,
-+    val ocrDurationMs: Long = 0,
-+    val pageDetectorDurationMs: Long = 0,
-+)
-+
-+class VisionWorker(
-+    private val frameStore: FrameStore,
-+    private val analyze: suspend (ScreenFrameSnapshot) -> VisionAnalysis,
-+    private val framesPerSecond: Int = 2,
-+) {
-+    init { require(framesPerSecond in 1..10) }
-+
-+    private val mutableMetrics = MutableStateFlow(VisionMetrics())
-+    val metrics: StateFlow<VisionMetrics> = mutableMetrics.asStateFlow()
-+    private val stableTracker = StablePageTracker()
-+    private val recentDurations = ArrayDeque<Long>()
-+    private var job: Job? = null
-+
-+    fun start(scope: CoroutineScope, viewportVersion: () -> Long) {
-+        if (job?.isActive == true) return
-+        job = scope.launch {
-+            var lastFrameId = 0L
-+            var processed = 0L
-+            val started = System.nanoTime()
-+            while (isActive) {
-+                val frame = frameStore.latestSnapshot()
-+                if (frame != null && frame.frameId != lastFrameId) {
-+                    val before = System.nanoTime()
-+                    val result = withContext(Dispatchers.Default) { analyze(frame) }
-+                    val duration = (System.nanoTime() - before) / 1_000_000L
-+                    processed++
-+                    val seconds = (System.nanoTime() - started).coerceAtLeast(1L) / 1_000_000_000f
-+                    val stable = stableTracker.add(result.detection, viewportVersion(), System.currentTimeMillis())
-+                    recentDurations.addLast(duration)
-+                    while (recentDurations.size > 100) recentDurations.removeFirst()
-+                    val sorted = recentDurations.sorted()
-+                    val p95 = sorted[((sorted.size - 1) * 0.95f).toInt()]
-+                    mutableMetrics.value = VisionMetrics(
-+                        frameId = frame.frameId,
-+                        visionFps = processed / seconds,
-+                        lastVisionDurationMs = duration,
-+                        p95VisionDurationMs = p95,
-+                        templateDurationMs = result.templateDurationMs,
-+                        ocrDurationMs = result.ocrDurationMs,
-+                        pageDetectorDurationMs = result.pageDetectorDurationMs,
-+                        pageDetection = result.detection,
-+                        stablePage = stable,
-+                        freeAttemptState = result.freeAttemptState,
-+                    )
-+                    lastFrameId = frame.frameId
-+                }
-+                delay(1_000L / framesPerSecond)
-+            }
-+        }
-+    }
-+
-+    fun invalidate() {
-+        stableTracker.clear()
-+        recentDurations.clear()
-+        mutableMetrics.value = VisionMetrics()
-+    }
-+
-+    fun stop() {
-+        job?.cancel()
-+        job = null
-+        invalidate()
-+    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ocr/MlKitChineseOcrEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ocr/MlKitChineseOcrEngine.kt
-new file mode 100644
-index 0000000..2be7b13
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/ocr/MlKitChineseOcrEngine.kt
-@@ -0,0 +1,62 @@
-+package com.lidquan.yishigame.vision.ocr
-+
-+import android.graphics.Bitmap
-+import com.google.mlkit.vision.common.InputImage
-+import com.google.mlkit.vision.text.TextRecognition
-+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
-+import com.lidquan.yishigame.vision.OcrEvidence
-+import kotlin.coroutines.resume
-+import kotlin.coroutines.resumeWithException
-+import kotlinx.coroutines.suspendCancellableCoroutine
-+
-+class MlKitChineseOcrEngine : OcrEngine, AutoCloseable {
-+    private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-+
-+    override suspend fun recognize(frame: ScreenFrameSnapshot, roi: WindowBounds): List<OcrEvidence> {
-+        val bitmap = roiBitmap(frame, roi)
-+        return try {
-+            val result = suspendCancellableCoroutine { continuation ->
-+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
-+                    .addOnSuccessListener { continuation.resume(it) }
-+                    .addOnFailureListener { continuation.resumeWithException(it) }
-+            }
-+            result.textBlocks.flatMap { block ->
-+                block.lines.mapNotNull { line ->
-+                    val bounds = line.boundingBox ?: return@mapNotNull null
-+                    val text = line.text
-+                    OcrEvidence(
-+                        id = "ocr.text",
-+                        text = text,
-+                        normalizedText = normalizeOcrText(text),
-+                        reportedConfidence = null,
-+                        rect = WindowBounds(bounds.left + roi.left, bounds.top + roi.top, bounds.right + roi.left, bounds.bottom + roi.top),
-+                    )
-+                }
-+            }
-+        } finally {
-+            bitmap.recycle()
-+        }
-+    }
-+
-+    override fun close() = recognizer.close()
-+
-+    private fun roiBitmap(frame: ScreenFrameSnapshot, roi: WindowBounds): Bitmap {
-+        require(roi.left >= 0 && roi.top >= 0 && roi.right <= frame.width && roi.bottom <= frame.height && roi.isValid)
-+        val pixels = IntArray(roi.width * roi.height)
-+        var target = 0
-+        for (y in roi.top until roi.bottom) {
-+            var source = y * frame.rowStride + roi.left * frame.pixelStride
-+            repeat(roi.width) {
-+                val r = frame.rgba[source].toInt() and 0xff
-+                val g = frame.rgba[source + 1].toInt() and 0xff
-+                val b = frame.rgba[source + 2].toInt() and 0xff
-+                val a = frame.rgba[source + 3].toInt() and 0xff
-+                pixels[target++] = (a shl 24) or (r shl 16) or (g shl 8) or b
-+                source += frame.pixelStride
-+            }
-+        }
-+        return Bitmap.createBitmap(pixels, roi.width, roi.height, Bitmap.Config.ARGB_8888)
-+    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt
-new file mode 100644
-index 0000000..725acc3
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt
-@@ -0,0 +1,25 @@
-+package com.lidquan.yishigame.vision.ocr
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
-+import com.lidquan.yishigame.vision.FreeAttemptState
-+import com.lidquan.yishigame.vision.OcrEvidence
-+
-+fun normalizeOcrText(value: String): String = value
-+    .trim()
-+    .replace('（', '(')
-+    .replace('）', ')')
-+    .replace(Regex("\\s+"), "")
-+
-+fun freeAttemptState(evidences: List<OcrEvidence>): FreeAttemptState = when {
-+    evidences.any { Regex("免费\\(1/1\\)").containsMatchIn(it.normalizedText) } -> FreeAttemptState.AVAILABLE
-+    else -> FreeAttemptState.UNKNOWN
-+}
-+
-+fun interface OcrEngine {
-+    suspend fun recognize(frame: ScreenFrameSnapshot, roi: WindowBounds): List<OcrEvidence>
-+}
-+
-+object NoOpOcrEngine : OcrEngine {
-+    override suspend fun recognize(frame: ScreenFrameSnapshot, roi: WindowBounds): List<OcrEvidence> = emptyList()
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt b/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt
-new file mode 100644
-index 0000000..0149017
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/page/PageDetector.kt
-@@ -0,0 +1,73 @@
-+package com.lidquan.yishigame.vision.page
-+
-+import com.lidquan.yishigame.vision.PageCandidate
-+import com.lidquan.yishigame.vision.PageDetection
-+import com.lidquan.yishigame.vision.StablePage
-+import com.lidquan.yishigame.vision.VisionEvidence
-+
-+data class SignalRule(val id: String, val minimumConfidence: Float = 0f)
-+
-+data class PageDefinition(
-+    val pageId: String,
-+    val version: Int,
-+    val required: List<SignalRule>,
-+    val optional: List<SignalRule> = emptyList(),
-+    val negative: List<SignalRule> = emptyList(),
-+    val threshold: Float,
-+    val minimumMargin: Float,
-+)
-+
-+class PageDetector(private val definitions: List<PageDefinition>) {
-+    fun detect(evidences: List<VisionEvidence>, candidates: Set<String>? = null): PageDetection {
-+        val byId = evidences.associateBy { it.id }
-+        val scored = definitions.asSequence()
-+            .filter { candidates == null || it.pageId in candidates }
-+            .mapNotNull { definition ->
-+                if (definition.negative.any { rule -> byId[rule.id]?.confidence.orZero() >= rule.minimumConfidence }) return@mapNotNull null
-+                val required = definition.required.map { rule -> byId[rule.id]?.takeIf { it.confidence >= rule.minimumConfidence } ?: return@mapNotNull null }
-+                val optional = definition.optional.mapNotNull { rule -> byId[rule.id]?.takeIf { it.confidence >= rule.minimumConfidence } }
-+                val used = required + optional
-+                val confidence = used.map { it.confidence }.average().toFloat()
-+                PageCandidate(definition.pageId, confidence, used)
-+            }
-+            .sortedByDescending { it.confidence }
-+            .toList()
-+        val best = scored.firstOrNull() ?: return PageDetection.Unknown(evidences)
-+        val definition = definitions.first { it.pageId == best.pageId }
-+        if (best.confidence < definition.threshold) return PageDetection.Unknown(evidences)
-+        val second = scored.getOrNull(1)
-+        if (second != null && best.confidence - second.confidence < definition.minimumMargin) {
-+            return PageDetection.Ambiguous(listOf(best, second))
-+        }
-+        return PageDetection.Matched(best.pageId, best.confidence, best.evidences)
-+    }
-+}
-+
-+private fun Float?.orZero(): Float = this ?: 0f
-+
-+class StablePageTracker(private val windowSize: Int = 3, private val requiredMatches: Int = 2) {
-+    init {
-+        require(windowSize > 0 && requiredMatches in 1..windowSize)
-+    }
-+
-+    private val history = ArrayDeque<PageDetection>()
-+    private var version: Long? = null
-+
-+    fun add(detection: PageDetection, viewportVersion: Long, observedAt: Long): StablePage? {
-+        if (version != viewportVersion) {
-+            history.clear()
-+            version = viewportVersion
-+        }
-+        history.addLast(detection)
-+        while (history.size > windowSize) history.removeFirst()
-+        val matches = history.filterIsInstance<PageDetection.Matched>()
-+        val group = matches.groupBy { it.pageId }.maxByOrNull { it.value.size } ?: return null
-+        if (group.value.size < requiredMatches) return null
-+        return StablePage(group.key, group.value.map { it.confidence }.average().toFloat(), observedAt, viewportVersion)
-+    }
-+
-+    fun clear() {
-+        history.clear()
-+        version = null
-+    }
-+}
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
-new file mode 100644
-index 0000000..da4124e
---- /dev/null
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
-@@ -0,0 +1,46 @@
-+package com.lidquan.yishigame.vision.template
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
-+import com.lidquan.yishigame.viewport.NormalizedRect
-+import com.lidquan.yishigame.vision.TemplateEvidence
-+
-+data class TemplateDefinition(
-+    val id: String,
-+    val version: Int,
-+    val pageId: String,
-+    val roi: NormalizedRect,
-+    val threshold: Float,
-+    val negative: Boolean = false,
-+)
-+
-+data class RgbaTemplate(val width: Int, val height: Int, val rgba: ByteArray)
-+
-+object TemplateMatcher {
-+    fun compare(id: String, candidate: RgbaTemplate, template: RgbaTemplate, rect: WindowBounds): TemplateEvidence? {
-+        if (candidate.width != template.width || candidate.height != template.height || candidate.rgba.size != template.rgba.size) return null
-+        if (candidate.rgba.isEmpty()) return null
-+        var difference = 0L
-+        for (index in candidate.rgba.indices) {
-+            difference += kotlin.math.abs((candidate.rgba[index].toInt() and 0xff) - (template.rgba[index].toInt() and 0xff))
-+        }
-+        val confidence = 1f - difference.toFloat() / (candidate.rgba.size * 255f)
-+        return TemplateEvidence(id, confidence.coerceIn(0f, 1f), rect)
-+    }
-+
-+    fun crop(frame: ScreenFrameSnapshot, rect: WindowBounds): RgbaTemplate {
-+        require(rect.left >= 0 && rect.top >= 0 && rect.right <= frame.width && rect.bottom <= frame.height && rect.isValid)
-+        require(frame.pixelStride >= 4 && frame.rowStride >= frame.width * frame.pixelStride)
-+        val output = ByteArray(rect.width * rect.height * 4)
-+        var target = 0
-+        for (y in rect.top until rect.bottom) {
-+            var source = y * frame.rowStride + rect.left * frame.pixelStride
-+            repeat(rect.width) {
-+                frame.rgba.copyInto(output, target, source, source + 4)
-+                source += frame.pixelStride
-+                target += 4
-+            }
-+        }
-+        return RgbaTemplate(rect.width, rect.height, output)
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
-new file mode 100644
-index 0000000..c06547e
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
-@@ -0,0 +1,33 @@
-+package com.lidquan.yishigame.action
-+
-+import com.lidquan.yishigame.automation.AutomationState
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.automation.WindowGate
-+import com.lidquan.yishigame.capture.ScreenCaptureState
-+import com.lidquan.yishigame.vision.FreeAttemptState
-+import com.lidquan.yishigame.vision.StablePage
-+import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertTrue
-+import org.junit.Test
-+
-+class ActionGuardTest {
-+    private val safe = ActionContext(
-+        AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
-+        WindowGate.MATCHED, true, StablePage("DUNGEON_DETAIL", .96f, 1, 1), setOf("DUNGEON_DETAIL"),
-+        WindowBounds(10, 10, 20, 20), setOf("LOADING"), FreeAttemptState.AVAILABLE,
-+    )
-+
-+    @Test fun `guard only allows dry run when every gate is confirmed`() {
-+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
-+        assertTrue(ActionGuard.plan(intent, safe) is GuardDecision.AllowDryRun)
-+        assertEquals(GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, safe.copy(targetActive = false)) as GuardDecision.Deny).reason)
-+        assertEquals(GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, safe.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
-+        assertEquals(GuardDenyReason.CAPTURE_INACTIVE, (ActionGuard.plan(intent, safe.copy(captureState = ScreenCaptureState.Stopped("test"))) as GuardDecision.Deny).reason)
-+        assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
-+    }
-+
-+    @Test fun `forbidden auto is always denied`() {
-+        val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE, riskLevel = RiskLevel.FORBIDDEN_AUTO), safe) as GuardDecision.Deny
-+        assertEquals(GuardDenyReason.FORBIDDEN_AUTO, decision.reason)
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/capture/FrameStoreTest.kt b/app/src/test/java/com/lidquan/yishigame/capture/FrameStoreTest.kt
-new file mode 100644
-index 0000000..7114b69
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/capture/FrameStoreTest.kt
-@@ -0,0 +1,18 @@
-+package com.lidquan.yishigame.capture
-+
-+import java.nio.ByteBuffer
-+import org.junit.Assert.assertArrayEquals
-+import org.junit.Assert.assertEquals
-+import org.junit.Test
-+
-+class FrameStoreTest {
-+    @Test fun `snapshot is isolated from reused capture buffer`() {
-+        val store = LatestFrameStore()
-+        store.publish(1, 1, 4, 4, 1, ByteBuffer.wrap(byteArrayOf(1, 2, 3, 4)))
-+        val first = store.latestSnapshot()!!
-+        store.publish(1, 1, 4, 4, 2, ByteBuffer.wrap(byteArrayOf(5, 6, 7, 8)))
-+        assertArrayEquals(byteArrayOf(1, 2, 3, 4), first.rgba)
-+        assertArrayEquals(byteArrayOf(5, 6, 7, 8), store.latestSnapshot()!!.rgba)
-+        assertEquals(2, store.metadata.value.frameId)
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt b/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt
-new file mode 100644
-index 0000000..a00abb6
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/viewport/ViewportMapperTest.kt
-@@ -0,0 +1,13 @@
-+package com.lidquan.yishigame.viewport
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import org.junit.Assert.assertEquals
-+import org.junit.Test
-+
-+class ViewportMapperTest {
-+    @Test fun `normalized roi follows viewport position and size`() {
-+        val roi = NormalizedRect(.25f, .2f, .75f, .8f)
-+        assertEquals(WindowBounds(150, 90, 250, 210), ViewportMapper.toScreen(roi, WindowBounds(100, 50, 300, 250)))
-+        assertEquals(WindowBounds(300, 180, 500, 420), ViewportMapper.toScreen(roi, WindowBounds(200, 100, 600, 500)))
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
-new file mode 100644
-index 0000000..baf5793
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
-@@ -0,0 +1,18 @@
-+package com.lidquan.yishigame.vision
-+
-+import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertTrue
-+import org.junit.Test
-+
-+class VisionConfigurationTest {
-+    @Test
-+    fun configurationIsVersionedAndDefinesThreePagesWithTwoSignalsEach() {
-+        val configuration = initialVisionConfiguration()
-+
-+        assertEquals(1, configuration.schemaVersion)
-+        assertTrue(configuration.templateSetVersion.isNotBlank())
-+        assertTrue(configuration.pageDefinitionVersion.isNotBlank())
-+        assertEquals(setOf("SETTINGS", "CHARACTER_SELECT", "DUNGEON_LIST"), configuration.pages.map { it.pageId }.toSet())
-+        assertTrue(configuration.pages.all { it.required.size >= 2 })
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/ocr/OcrEngineTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/ocr/OcrEngineTest.kt
-new file mode 100644
-index 0000000..fac0c38
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/ocr/OcrEngineTest.kt
-@@ -0,0 +1,18 @@
-+package com.lidquan.yishigame.vision.ocr
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.vision.FreeAttemptState
-+import com.lidquan.yishigame.vision.OcrEvidence
-+import org.junit.Assert.assertEquals
-+import org.junit.Test
-+
-+class OcrEngineTest {
-+    @Test fun `normalizes Chinese punctuation and confirms only exact free attempt`() {
-+        val rect = WindowBounds(0, 0, 1, 1)
-+        val normalized = normalizeOcrText(" 免费 （ 1/1 ） ")
-+        assertEquals("免费(1/1)", normalized)
-+        assertEquals(FreeAttemptState.AVAILABLE, freeAttemptState(listOf(OcrEvidence("free", "", normalized, .9f, rect))))
-+        assertEquals(FreeAttemptState.UNKNOWN, freeAttemptState(emptyList()))
-+        assertEquals(FreeAttemptState.UNKNOWN, freeAttemptState(listOf(OcrEvidence("free", "免费", "免费", .9f, rect))))
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt
-new file mode 100644
-index 0000000..572b77f
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/page/PageDetectorTest.kt
-@@ -0,0 +1,33 @@
-+package com.lidquan.yishigame.vision.page
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import com.lidquan.yishigame.vision.PageDetection
-+import com.lidquan.yishigame.vision.TemplateEvidence
-+import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertNull
-+import org.junit.Assert.assertTrue
-+import org.junit.Test
-+
-+class PageDetectorTest {
-+    private val rect = WindowBounds(0, 0, 1, 1)
-+    private fun evidence(id: String, confidence: Float) = TemplateEvidence(id, confidence, rect)
-+
-+    @Test fun `required optional negative unknown and ambiguous remain explicit`() {
-+        val detector = PageDetector(listOf(
-+            PageDefinition("MAIN", 1, listOf(SignalRule("main", .8f)), listOf(SignalRule("common")), listOf(SignalRule("purchase", .8f)), .8f, .05f),
-+            PageDefinition("SETTINGS", 1, listOf(SignalRule("settings", .8f)), threshold = .8f, minimumMargin = .05f),
-+        ))
-+        assertTrue(detector.detect(emptyList()) is PageDetection.Unknown)
-+        assertTrue(detector.detect(listOf(evidence("main", .95f), evidence("purchase", .9f))) is PageDetection.Unknown)
-+        assertTrue(detector.detect(listOf(evidence("main", .91f), evidence("settings", .89f))) is PageDetection.Ambiguous)
-+        assertEquals("MAIN", (detector.detect(listOf(evidence("main", .95f))) as PageDetection.Matched).pageId)
-+    }
-+
-+    @Test fun `stable page needs repeated matches and resets on viewport version`() {
-+        val tracker = StablePageTracker(3, 2)
-+        val match = PageDetection.Matched("MAIN", .95f, emptyList())
-+        assertNull(tracker.add(match, 1, 1))
-+        assertEquals("MAIN", tracker.add(match, 1, 2)?.pageId)
-+        assertNull(tracker.add(match, 2, 3))
-+    }
-+}
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
-new file mode 100644
-index 0000000..e9734cd
---- /dev/null
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
-@@ -0,0 +1,17 @@
-+package com.lidquan.yishigame.vision.template
-+
-+import com.lidquan.yishigame.automation.WindowBounds
-+import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertTrue
-+import org.junit.Test
-+
-+class TemplateMatcherTest {
-+    @Test fun `template confidence supports per-template threshold`() {
-+        val rect = WindowBounds(0, 0, 1, 1)
-+        val template = RgbaTemplate(1, 1, byteArrayOf(0, 10, 20, 30))
-+        val exact = TemplateMatcher.compare("anchor", template, template, rect)!!
-+        val different = TemplateMatcher.compare("anchor", RgbaTemplate(1, 1, byteArrayOf(100, 110, 120, 127)), template, rect)!!
-+        assertEquals(1f, exact.confidence)
-+        assertTrue(different.confidence < .9f)
-+    }
-+}
-diff --git a/templates/vision/manifests/pages.example.json b/templates/vision/manifests/pages.example.json
-new file mode 100644
-index 0000000..b93720e
---- /dev/null
-+++ b/templates/vision/manifests/pages.example.json
-@@ -0,0 +1,15 @@
++++ b/config/content-viewport.example.json
+@@ -0,0 +1,6 @@
 +{
-+  "schemaVersion": 1,
-+  "pageDefinitionVersion": 1,
-+  "pages": [
-+    {
-+      "pageId": "EXAMPLE",
-+      "version": 1,
-+      "required": [{"type": "template", "id": "page.example.anchor", "minimumConfidence": 0.9}],
-+      "optional": [],
-+      "negative": [{"type": "template", "id": "purchase.dialog", "minimumConfidence": 0.95}],
-+      "threshold": 0.9,
-+      "minimumMargin": 0.05
-+    }
-+  ]
++  "profileVersion": 1,
++  "windowBounds": { "left": 0, "top": 0, "right": 1200, "bottom": 1800 },
++  "contentViewport": { "left": 8, "top": 40, "right": 1192, "bottom": 1792 },
++  "verification": "Replace example values only after local visual verification; never guess insets."
 +}
 diff --git a/templates/vision/manifests/template-set.example.json b/templates/vision/manifests/template-set.example.json
-new file mode 100644
-index 0000000..644ab7b
---- /dev/null
+index 644ab7b..a934193 100644
+--- a/templates/vision/manifests/template-set.example.json
 +++ b/templates/vision/manifests/template-set.example.json
-@@ -0,0 +1,16 @@
-+{
-+  "schemaVersion": 1,
-+  "templateSetVersion": 1,
-+  "templates": [
-+    {
-+      "id": "page.example.anchor",
-+      "version": 1,
-+      "pageId": "EXAMPLE",
-+      "roi": {"left": 0.7, "top": 0.8, "right": 0.95, "bottom": 0.95},
-+      "threshold": 0.9,
-+      "scalePolicy": "FIXED_OR_LIMITED",
-+      "negative": false,
-+      "asset": "private://page.example.anchor.png"
-+    }
-+  ]
-+}
-diff --git a/tools/vision-sampler/README.md b/tools/vision-sampler/README.md
-new file mode 100644
-index 0000000..bcc7e32
---- /dev/null
-+++ b/tools/vision-sampler/README.md
-@@ -0,0 +1,16 @@
-+# Vision Sampler
-+
-+从本地私有截图按已确认 viewport 和 normalized ROI 裁剪最小模板：
-+
-+```bash
-+python3 tools/vision-sampler/vision_sampler.py crop \
-+  --image ~/.config/yishijieyongzhe/private/vision/screen.png \
-+  --viewport 100,20,1100,1700 \
-+  --roi 0.70,0.80,0.95,0.95 \
-+  --id page.example.anchor \
-+  --page-id EXAMPLE
-+```
-+
-+输出默认留在 `~/.config/yishijieyongzhe/private/vision/templates/`，目录为 `0700`、文件为 `0600`。metadata 的 `privacyReview` 固定为 `PENDING`；工具不会把截图或模板复制到仓库。公开模板必须另行人工检查并确认不含账号、角色名、聊天、通知、二维码、设备或网络信息。
-+
-+依赖 Pillow，仅用于开发机裁剪：`python3 -m pip install Pillow`。
-diff --git a/tools/vision-sampler/test_vision_sampler.py b/tools/vision-sampler/test_vision_sampler.py
-new file mode 100644
-index 0000000..b4cd27c
---- /dev/null
-+++ b/tools/vision-sampler/test_vision_sampler.py
-@@ -0,0 +1,25 @@
-+import importlib.util
-+import stat
-+import tempfile
-+import unittest
-+from pathlib import Path
-+
-+MODULE = Path(__file__).with_name("vision_sampler.py")
-+SPEC = importlib.util.spec_from_file_location("vision_sampler", MODULE)
-+vision_sampler = importlib.util.module_from_spec(SPEC)
-+SPEC.loader.exec_module(vision_sampler)
-+
-+
-+class VisionSamplerTest(unittest.TestCase):
-+    def test_roi_validation_and_private_writer(self):
-+        self.assertEqual((0.1, 0.2, 0.8, 0.9), vision_sampler.parse_roi("0.1,0.2,0.8,0.9"))
-+        with tempfile.TemporaryDirectory() as root:
-+            path = Path(root) / "private" / "value.json"
-+            vision_sampler.private_dir(path.parent)
-+            vision_sampler.write_private(path, "{}")
-+            self.assertEqual(0o700, stat.S_IMODE(path.parent.stat().st_mode))
-+            self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
-+
-+
-+if __name__ == "__main__":
-+    unittest.main()
+@@ -8,7 +8,7 @@
+       "pageId": "EXAMPLE",
+       "roi": {"left": 0.7, "top": 0.8, "right": 0.95, "bottom": 0.95},
+       "threshold": 0.9,
+-      "scalePolicy": "FIXED_OR_LIMITED",
++      "scalePolicy": "FIXED",
+       "negative": false,
+       "asset": "private://page.example.anchor.png"
+     }
+diff --git a/tools/security/check_public_repo.py b/tools/security/check_public_repo.py
+index 1275106..6e19cf9 100755
+--- a/tools/security/check_public_repo.py
++++ b/tools/security/check_public_repo.py
+@@ -97,7 +97,7 @@ def placeholder(value: str) -> bool:
+         return True
+     if upper.startswith(("YOUR_", "EXAMPLE", "REDACTED", "CHANGE_ME", "CHANGEME", "PLACEHOLDER", "NOT_SET")):
+         return True
+-    if upper in {"NONE", "NULL", "N/A"} or set(upper) <= {"X", "_", "-"}:
++    if upper in {"NONE", "NULL", "N/A", "LONG", "STRING", "INT", "BOOLEAN", "FLOAT", "DOUBLE"} or set(upper) <= {"X", "_", "-"}:
+         return True
+     if re.fullmatch(r"(?:\d{1,3}\.){2,3}x(?:\.x)*", value, re.IGNORECASE):
+         return True
 diff --git a/tools/vision-sampler/vision_sampler.py b/tools/vision-sampler/vision_sampler.py
-new file mode 100644
-index 0000000..b668fa6
---- /dev/null
+index b668fa6..6a19145 100644
+--- a/tools/vision-sampler/vision_sampler.py
 +++ b/tools/vision-sampler/vision_sampler.py
-@@ -0,0 +1,90 @@
-+#!/usr/bin/env python3
-+"""Crop a normalized ROI from a private screenshot; never publishes automatically."""
-+
-+from __future__ import annotations
-+
-+import argparse
-+import json
-+import os
-+from pathlib import Path
-+
-+
-+def parse_roi(value: str) -> tuple[float, float, float, float]:
-+    parts = tuple(float(part) for part in value.split(","))
-+    if len(parts) != 4 or not (0 <= parts[0] < parts[2] <= 1 and 0 <= parts[1] < parts[3] <= 1):
-+        raise argparse.ArgumentTypeError("ROI must be left,top,right,bottom within 0..1")
-+    return parts
-+
-+
-+def private_dir(path: Path) -> None:
-+    path.mkdir(parents=True, exist_ok=True)
-+    path.chmod(0o700)
-+
-+
-+def write_private(path: Path, content: str) -> None:
-+    path.write_text(content, encoding="utf-8")
-+    path.chmod(0o600)
-+
-+
-+def crop(args: argparse.Namespace) -> None:
-+    try:
-+        from PIL import Image
-+    except ImportError as error:
-+        raise SystemExit("Pillow is required: python3 -m pip install Pillow") from error
-+
-+    image_path = Path(args.image).expanduser().resolve()
-+    output_dir = Path(args.output).expanduser().resolve()
-+    private_dir(output_dir)
-+    with Image.open(image_path) as image:
-+        viewport = args.viewport or (0, 0, image.width, image.height)
-+        left, top, right, bottom = args.roi
-+        box = (
-+            viewport[0] + round((viewport[2] - viewport[0]) * left),
-+            viewport[1] + round((viewport[3] - viewport[1]) * top),
-+            viewport[0] + round((viewport[2] - viewport[0]) * right),
-+            viewport[1] + round((viewport[3] - viewport[1]) * bottom),
-+        )
-+        result = image.crop(box)
-+        asset = output_dir / f"{args.id}.png"
-+        result.save(asset)
-+        asset.chmod(0o600)
-+    metadata = {
-+        "schemaVersion": 1,
-+        "templateSetVersion": args.template_set_version,
-+        "id": args.id,
-+        "version": 1,
-+        "pageId": args.page_id,
-+        "roi": dict(zip(("left", "top", "right", "bottom"), args.roi)),
-+        "threshold": args.threshold,
-+        "scalePolicy": "FIXED_OR_LIMITED",
-+        "negative": args.negative,
-+        "asset": asset.name,
-+        "privacyReview": "PENDING",
-+    }
-+    write_private(output_dir / f"{args.id}.json", json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
-+    print(f"Private ROI created: {asset}")
-+    print("Privacy review remains PENDING; this tool never copies files into the repository.")
-+
-+
-+def main() -> None:
-+    parser = argparse.ArgumentParser()
-+    sub = parser.add_subparsers(required=True)
-+    command = sub.add_parser("crop")
-+    command.add_argument("--image", required=True)
-+    command.add_argument("--output", default="~/.config/yishijieyongzhe/private/vision/templates")
-+    command.add_argument("--viewport", type=lambda value: tuple(int(part) for part in value.split(",")))
-+    command.add_argument("--roi", required=True, type=parse_roi)
-+    command.add_argument("--id", required=True)
-+    command.add_argument("--page-id", default="UNKNOWN")
-+    command.add_argument("--threshold", type=float, default=0.90)
-+    command.add_argument("--template-set-version", type=int, default=1)
-+    command.add_argument("--negative", action="store_true")
-+    command.set_defaults(run=crop)
-+    args = parser.parse_args()
-+    if args.viewport is not None and len(args.viewport) != 4:
-+        parser.error("viewport must be left,top,right,bottom")
-+    args.run(args)
-+
-+
-+if __name__ == "__main__":
-+    main()
+@@ -56,7 +56,7 @@ def crop(args: argparse.Namespace) -> None:
+         "pageId": args.page_id,
+         "roi": dict(zip(("left", "top", "right", "bottom"), args.roi)),
+         "threshold": args.threshold,
+-        "scalePolicy": "FIXED_OR_LIMITED",
++        "scalePolicy": "FIXED",
+         "negative": args.negative,
+         "asset": asset.name,
+         "privacyReview": "PENDING",
