@@ -1,4 +1,4 @@
-# IMPLEMENT-0005：第一轮 Review 修复
+# IMPLEMENT-0005：第二轮 Review 修复
 
 ## 对应需求编号
 
@@ -6,81 +6,84 @@ REQ-0005
 
 ## 本次实现目标
 
-仅修复 `REVIEW-0005` 第一轮列出的 4 个 BLOCKER 和 3 个 REQUIRED 项；不新增需求，不接入任何真实游戏点击、滑动、返回、角色切换、副本或战斗。
+仅修复 `REVIEW-0005` 第二轮结论列出的 4 个 BLOCKER 和 Template negative REQUIRED 项。不新增 REQ-0006，不实现真实 Action Executor，不执行游戏输入，不开始副本、角色切换或战斗。
 
 ## 修改文件
 
-- 修正 StablePage 生命周期、最新帧判定和 Action Guard 新鲜度门禁。
-- 将 windowBounds 与 contentViewport 分层，并增加本地 profile schema 示例。
-- 打通真实 OCR anchor 到 Action Guard 的只读 Dry-Run 链路。
-- 将 TemplateDefinition 的 ROI、阈值、negative 和 FIXED scale policy 接入生产视觉引擎。
-- 增加可配置语义 OCR 信号；默认未配置免费次数 ROI，因此保持 UNKNOWN。
-- 修正公开仓库安全扫描器对 Kotlin 类型声明的误报。
+- `action/ActionGuard.kt`：集中 ActionPolicy，Context 只保留事实，增加动作目标视口包含校验。
+- `vision/ConfiguredVisionEngine.kt`：页面 OCR、语义 OCR、动作目标证据分流。
+- `vision/VisionModels.kt`、`VisionWorker.kt`：传递独立 ActionTargetEvidence。
+- `MainViewModel.kt`：Stop 仅清视觉状态，不终止常驻 worker；Dry-Run 消费中心政策与独立动作目标。
+- `ui/AssistantApp.kt`：显示真实 targetRect 与 tapPoint。
+- Template manifest、sampler、matcher：删除重复的 template negative 字段。
+- JVM 与 Android 私有 fixture 测试同步更新。
 
 ## 新增文件
 
-- `config/content-viewport.example.json`
+- `app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt`
+- `app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt`
 
 ## 核心实现说明
 
-- WindowGate 进入 CHANGED/UNAVAILABLE、采集状态变化、目标包变化及重新接受 viewport 时立即清空视觉历史；窗口版本同步递增。
-- 最新 detection 必须是同页 MATCHED 才能产出 actionable StablePage；UNKNOWN、AMBIGUOUS 或不同页面立即得到 null。
-- StablePage 携带 anchor rect；Action Guard 校验 viewport version 和最大年龄，分别拒绝 PAGE_VIEWPORT_MISMATCH 与 PAGE_STALE。
-- 生产视觉只读取与当前 windowBounds 精确匹配的已确认 contentViewport profile；未确认时返回 UNKNOWN，Guard 返回 VIEWPORT_INVALID。
-- DUNGEON_LIST 的已采样 `dungeon.anchor` 作为 NORMAL 级只读计划来源。UI和真机测试只展示 would-tap rect，从未调用手势执行器。
-- 模板链路现为 Definition → content ROI → FIXED matcher → threshold → TemplateEvidence → PageDetector required/negative。LIMITED_SCALE 未实现，也不再宣称支持。
+- `ActionIntent` 现在只有 ActionType。riskLevel、allowedPages、requiredTargetId、expectedPagesAfter 全部由 `ActionPolicyRegistry` 唯一决定。
+- `START_DUNGEON_FREE` 固定为 SENSITIVE；`PURCHASE` 固定为 FORBIDDEN_AUTO。调用方已无字段可降低风险、扩大页面或伪造后置页面。
+- FreeAttemptState 只读取类型为 FREE_ATTEMPT 的 semantic ROI；普通页面 OCR 和其他 semantic 类型不会污染状态，无配置强制 UNKNOWN。
+- 页面识别 evidence 与动作目标 evidence 使用不同 ID/通道。动作目标 rect 来自 ML Kit 实际 line boundingBox，不再使用搜索 ROI。
+- Guard 必须从中心政策指定的 target ID 取证，并确认整个 rect 位于 contentViewport 内，否则分别返回 TARGET_NOT_CONFIRMED / TARGET_OUTSIDE_VIEWPORT。
+- Stop 仍停止 capture 并清空视觉结果，但不 cancel VisionWorker；同一 worker 在新帧到达后可重新形成 detection/stablePage。仅 ViewModel onCleared 真正停止 worker。
+- TemplateDefinition 不再含 negative；正负规则统一由 PageDefinition 管理。
 
 ## 关键技术决策
 
-- 延续最小修复：不引入新的视觉依赖或动作执行层。
-- 当前 Pad 实测 profile 中 Accessibility windowBounds 与游戏 contentViewport 相同，但数据模型仍明确分层；真实数值只存本机私有 fixture metadata，公开仓库仅留虚构示例。
-- 免费次数信号必须显式配置 ROI；无配置或无真实证据一律 UNKNOWN。
+- 沿用现有类型和数据流完成修复，未增加依赖或动作执行层。
+- 私有截图目视确认“切换区域”为真实按钮；Dry-Run 只展示其文字 boundingBox 中心，不执行该点。
+- R2-REQUIRED-06 被 Review 明确列为后续校准入口且未列入本轮五项修复结论，因此本轮不扩展校准 UI，也不猜 inset。
 
 ## 构建结果
 
 - `assembleDebug`：通过。
-- Android test 源码编译：通过。
-- 存在 SDK XML 工具版本提示，不影响构建和测试。
+- Android test 编译：通过。
+- Android SDK XML 版本提示仍不阻塞。
 
 ## 自动化测试结果
 
-- JVM 单元测试：28 项通过，0 失败，0 跳过。
-- Pad Inspector 与 Vision Sampler：6 项通过。
+- JVM：31 项通过，0 失败，0 跳过。
+- ActionPolicy bypass、免费语义隔离、真实 OCR rect、target containment、worker invalidate→重新识别均有自动测试。
+- Pad Inspector / Vision Sampler：6 项通过。
 - `git diff --check`：通过。
-- 覆盖最新帧 UNKNOWN/AMBIGUOUS/不同页失效、不同 contentViewport 映射、模板正负证据、页面过期和 viewport mismatch。
 
 ## ADB / 真机测试结果
 
-- 无线 ADB 目标 Pad 在线。
-- `connectedDebugAndroidTest`：公开设备测试通过；Gradle 重装会清除私有 fixture，因此随后在同一最终 APK 上单独运行私有测试，1 项通过（1.512 秒）。
-- 私有 fixture 测试从每张截图的私有 JSON metadata 读取 windowBounds/contentViewport，不再在源码硬编码真实坐标。
-- 私有测试中 SETTINGS、CHARACTER_SELECT、DUNGEON_LIST 三页识别通过。
-- DUNGEON_LIST 真实 OCR anchor → Action Guard 返回 ALLOW_DRY_RUN；同场景失焦、窗口变化、缺 anchor 分别正确 DENY。
-- 全程 0 gesture；未向游戏执行点击、滑动或返回。
+- 无线 ADB 目标 Pad在线。
+- `connectedDebugAndroidTest`：通过。
+- 最终 APK 上单独注入本机私有 fixture 后，真实三页测试 1 项通过（1.571 秒）。
+- SETTINGS、CHARACTER_SELECT、DUNGEON_LIST 继续识别成功。
+- DUNGEON_LIST 的独立动作目标来自实际 OCR boundingBox；ALLOW_DRY_RUN 以及失焦、窗口变化、缺目标 DENY 均通过。
+- Stop→invalidate→新帧重新形成 StablePage 的同 worker 生命周期测试通过。
+- 全程 0 游戏 gesture。
 
 ## 安全扫描
 
 - 扫描器自测通过。
-- 当前文件、Git 索引及完整可达历史扫描通过：127 个当前/索引文本文件、180 个历史文本 blob，2 个二进制或超大对象跳过。
-- 未提交私有截图、fixture metadata、设备地址、包名、账号数据或凭据。
+- 当前/索引与完整 Git 历史扫描通过；私有截图、元数据、设备地址和凭据未提交。
+- 本轮未增加或调用任何手势执行路径。
 
 ## 已知问题
 
-- contentViewport 当前由环境检查显式接受；若设备装饰区发生变化，必须重新确认 profile，系统不会猜 inset。
-- 真实模板仍保留在本机且隐私审核为 PENDING；公开仓库不包含真实模板。
-- SDK XML 版本提示仍存在。
+- 当前动作目标使用按钮文字 boundingBox，而不是完整按钮外框；满足 Dry-Run 证据闭环，但未来真实 Executor 前应优先使用已审核的按钮模板或可访问节点边界。
+- 真实模板仍为本机私有 PENDING 资产。
+- contentViewport 的非等值校准入口按 R2 结论留待后续，不猜 inset。
 
 ## 未完成内容
 
-- 未实现 LIMITED_SCALE。
-- 未配置免费次数真实 ROI，FreeAttemptState 继续为 UNKNOWN。
-- 未实现任何真实游戏操作、副本自动化或战斗功能。
+- 未实现 Action Executor、真实点击、滑动或返回。
+- 未开始副本、角色切换或战斗。
+- 未配置未经真实样本确认的免费次数 ROI。
 
 ## 后续建议
 
-- 等待 ChatGPT 第二轮 Review，重点复审视觉失效时序、contentViewport profile 和真实 Dry-Run 正负门禁。
-- Review 通过前不扩展动作能力。
+- 等待 ChatGPT 第三轮 Review，重点复审中心政策不可绕过性、semantic OCR 隔离、动作目标证据和 Stop 生命周期。
 
 ## Git commit hash
 
-`25cd436880a4bba57393004fa84571782d5d7456`
+`fd0f318daa8135ea33393dba36d45ec68b3d64c6`
