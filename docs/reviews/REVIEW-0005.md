@@ -835,3 +835,98 @@ semantic OCR facts / freeAttemptSignal
 不得新增 REQ-0006，不得接真实 Action Executor，不得对游戏执行点击/滑动/返回，不得开始副本自动化或角色切换。
 
 修完后重新执行 JVM tests、connected Android tests、私有 fixture tests、Stop→Restart Vision 生命周期测试、ActionPolicy bypass tests、Semantic FreeAttempt isolation tests、targetRect containment tests、Pad Inspector / Vision Sampler、安全扫描和 `git diff --check`，再更新 IMPLEMENT-0005 / LATEST / LATEST.patch 交给第三轮复审。
+
+
+---
+
+# 第三轮复审（R3）
+
+复审日期：2026-09-20  
+复审实现提交：`fd0f318daa8135ea33393dba36d45ec68b3d64c6`  
+交接提交：`fde90cb48414aa369d80866217d49fe260d35995`  
+状态：**ACCEPTED**
+
+## R3-1. R2 问题最终复核
+
+- **R2-BLOCKER-01 ActionPolicy 中心化：PASS**
+  - `ActionIntent` 只保留 `ActionType`。
+  - riskLevel、allowedPages、requiredTargetId、expectedPagesAfter 统一由 `ActionPolicyRegistry` 决定。
+  - `START_DUNGEON_FREE` 固定为 SENSITIVE。
+  - `PURCHASE` 固定为 FORBIDDEN_AUTO。
+  - 调用方已无法通过参数降低动作风险或扩大允许页面。
+
+- **R2-BLOCKER-02 FreeAttempt semantic OCR 隔离：PASS**
+  - 普通页面 OCR 不再参与 FreeAttemptState 计算。
+  - 只有 `SemanticOcrSignalType.FREE_ATTEMPT` 的显式 ROI 才可提供免费次数证据。
+  - 未配置或 OCR 失败保持 UNKNOWN。
+  - GENERIC semantic signal 不污染 FreeAttemptState。
+
+- **R2-BLOCKER-03 ActionTargetEvidence：PASS**
+  - 页面 evidence 与 action target 使用独立通道。
+  - action target rect 来自实际 OCR line boundingBox，不再使用整个搜索 ROI。
+  - Action Guard 检查 targetRect 必须完整位于 contentViewport 内。
+  - 缺失 target 返回 TARGET_NOT_CONFIRMED；越界返回 TARGET_OUTSIDE_VIEWPORT。
+  - 真机私有 fixture 已形成实际 targetRect / tapPoint 的 ALLOW_DRY_RUN。
+
+- **R2-BLOCKER-04 Stop → Restart Vision 生命周期：PASS**
+  - 用户 Stop 只 invalidate Vision，不再取消 VisionWorker。
+  - `onCleared()` 才真正 stop worker。
+  - 同一 worker 生命周期可在新 capture 帧到达后重新形成 detection / stablePage。
+  - 自动测试已覆盖 invalidate → 新帧 → 稳定页恢复。
+
+- **R2-REQUIRED-05 Template negative 单一事实来源：PASS**
+  - TemplateDefinition / manifest / sampler 中重复 negative 字段已删除。
+  - negative 规则统一归 PageDefinition 管理。
+
+## R3-2. 回归与安全验证
+
+本轮记录的最终验证：
+
+- JVM tests：31 项通过。
+- connected Android tests：通过。
+- 私有真实页面 fixture：通过。
+- SETTINGS / CHARACTER_SELECT / DUNGEON_LIST 继续正确识别。
+- DUNGEON_LIST 正向 Vision → ActionGuard → ALLOW_DRY_RUN 成功。
+- 同场景失焦、WindowGate 变化、缺 target 均正确 DENY。
+- Pad Inspector / Vision Sampler 测试通过。
+- 安全扫描与 `git diff --check` 通过。
+- 全程没有新增或执行游戏 gesture。
+
+## R3-3. 非阻塞技术债
+
+以下不阻塞 REQ-0005，但在任何真实 Action Executor 接入前必须继续处理：
+
+1. 当前 action target 使用按钮文字 boundingBox，而不是完整按钮外框。真实点击阶段优先使用已审核 template / accessibility bounds / 明确按钮视觉区域。
+2. `ActionTargetEvidence.confidence` 当前在进入 `VisionMetrics.actionTargets` 后只保留 rect。真实 Executor 前应保留 confidence/source，并允许 policy 设置最低 target confidence。
+3. 当前演示政策 `OPEN_DUNGEON → dungeon.switch_region` 主要用于证明 Dry-Run 链路；接入真实业务动作前应校正 ActionType 与实际按钮语义，避免“动作名与控件含义不一致”。
+4. 当前目标 Pad 实测 contentViewport 可与 windowBounds 同值；若未来出现标题栏/inset，必须增加真实本地校准入口，不得猜 inset。
+5. 免费次数真实 ROI 尚未采集，必须继续保持 UNKNOWN，直到取得真实样本。
+6. 真实模板仍为本地私有 PENDING 资产；LIMITED_SCALE 尚未实现。
+7. Vision Debug 后续可继续增强 evidence/ROI/OCR 细节展示，但不影响本阶段识别与 Guard Dry-Run 验收。
+
+## R3-4. 最终结论
+
+```text
+REQ-0005 = ACCEPTED
+允许创建 Pull Request：
+feat/req-0005-vision-foundation → main
+
+暂不接入真实游戏输入。
+下一阶段开始前，必须先设计真实 Action Executor 的额外安全门禁与首个最小可控操作范围。
+```
+
+REQ-0005 的目标已经达到：
+
+```text
+Frame
+→ contentViewport / ROI
+→ OCR / Template evidence
+→ PageDetector
+→ StablePage
+→ ActionTargetEvidence
+→ ActionPolicy
+→ ActionGuard
+→ ALLOW_DRY_RUN / DENY
+```
+
+并保持全程 0 游戏 gesture。
