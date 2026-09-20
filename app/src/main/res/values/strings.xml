@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">异世界勇者自动化助手</string>
+    <string name="accessibility_service_name">异世界勇者助手基础服务</string>
+    <string name="accessibility_service_description">提供窗口检测与受控输入能力。M0 不执行游戏自动点击。</string>
+    <string name="capture_notification_channel">屏幕采集</string>
+    <string name="capture_notification_title">正在验证屏幕采集能力</string>
+</resources>

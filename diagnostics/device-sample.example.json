@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "label": "example-only",
+  "device": {
+    "manufacturer": "sample",
+    "model": "sample",
+    "android_release": "sample",
+    "sdk": "sample"
+  },
+  "display": {
+    "physical_size": "sample",
+    "override_size": null,
+    "density": "sample",
+    "orientation": "sample"
+  },
+  "foreground": {
+    "package": "example.confirmed.game"
+  },
+  "window": {
+    "bounds": [0, 0, 1600, 900],
+    "width": 1600,
+    "height": 900
+  }
+}

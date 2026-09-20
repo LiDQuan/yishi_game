@@ -1,470 +1,601 @@
-diff --git a/.env.example b/.env.example
-new file mode 100644
-index 0000000..11eec29
---- /dev/null
-+++ b/.env.example
-@@ -0,0 +1,9 @@
-+# Copy required values to ~/.config/yishijieyongzhe/secrets.env.
-+# Prefer macOS Keychain for long-lived credentials.
-+GITEE_TOKEN=YOUR_TOKEN_HERE
-+GITHUB_TOKEN=YOUR_TOKEN_HERE
-+API_TOKEN=YOUR_TOKEN_HERE
-+ANDROID_KEYSTORE_PATH=/path/to/private/app.keystore
-+ANDROID_KEYSTORE_PASSWORD=YOUR_PASSWORD_HERE
-+ANDROID_KEY_ALIAS=YOUR_KEY_ALIAS_HERE
-+ANDROID_KEY_PASSWORD=YOUR_PASSWORD_HERE
-diff --git a/.gitignore b/.gitignore
-index b0b3efd..4a6db76 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -6,6 +6,8 @@
+diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+index 8527b7c..8d2c943 100644
+--- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
++++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+@@ -1,17 +1,16 @@
+ package com.lidquan.yishigame
  
- # Android / Gradle local and generated files
- .gradle/
-+build/
-+*/build/
- **/build/
- local.properties
- captures/
-@@ -16,22 +18,60 @@ captures/
- .env
- .env.*
- !.env.example
-+*.env
-+secrets/
-+private/
-+*.secret
-+*.token
- *.jks
- *.keystore
- keystore.properties
- signing.properties
- secrets.properties
- *.pem
-+*.key
- *.p12
- *.pfx
--*.token
- gitee_pat.txt
- credentials.json
- credentials.yml
- credentials.yaml
-+cookies.txt
-+session.json
-+auth.json
-+id_rsa
-+id_ed25519
-+id_ecdsa
-+
-+# Runtime private data
-+diagnostics/private/
-+diagnostics/local/
-+logs/private/
-+errors/private/
-+screenshots/private/
-+tmp/
-+cache/
-+
-+# ADB / device dumps
-+adb/
-+device-dumps/
-+uiautomator/
-+logcat/
-+*.logcat
-+crash-dumps/
-+tombstones/
-+*.dump
-+*.dmp
-+*.hprof
+-import android.accessibilityservice.AccessibilityServiceInfo
+ import android.app.Application
+-import android.content.ComponentName
+ import android.content.Context
+ import android.content.Intent
+ import android.os.Build
+ import android.provider.Settings
+-import android.view.accessibility.AccessibilityManager
+ import androidx.lifecycle.AndroidViewModel
+ import androidx.lifecycle.viewModelScope
+ import com.lidquan.yishigame.accessibility.GameAccessibilityService
+ import com.lidquan.yishigame.automation.AutomationEvent
++import com.lidquan.yishigame.automation.EnvironmentChangeReason
++import com.lidquan.yishigame.automation.RecoveryRequirement
+ import com.lidquan.yishigame.automation.AutomationState
+ import com.lidquan.yishigame.automation.AutomationStateMachine
+ import com.lidquan.yishigame.automation.WindowBounds
+@@ -26,25 +25,37 @@ import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
  
- # Logs and temporary files
- *.log
- *.tmp
- *.swp
- *~
+ data class EnvironmentUiState(
+     val automationState: AutomationState = AutomationState.IDLE,
++    val recoveryRequirement: RecoveryRequirement = RecoveryRequirement.NONE,
+     val accessibilityEnabled: Boolean = false,
+     val captureState: ScreenCaptureState = ScreenCaptureState.NotRequested,
+     val latestFrameBytes: Int = 0,
+     val targetPackageInput: String = "",
+-    val targetDetected: Boolean = false,
++    val targetVisible: Boolean = false,
++    val targetActive: Boolean = false,
+     val windowBounds: WindowBounds? = null,
+     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
+     val deviceSummary: String = "",
+     val recentEvents: List<DiagnosticEvent> = emptyList(),
+ ) {
+-    val canBeginPlaceholder: Boolean get() =
++    val canArmPlaceholder: Boolean get() =
+         automationState == AutomationState.READY &&
+             accessibilityEnabled &&
+             captureState is ScreenCaptureState.Active &&
+-            targetDetected &&
++            targetVisible &&
++            windowGate == WindowGate.MATCHED
 +
-+# Python
-+.venv/
-+venv/
-+__pycache__/
-+*.pyc
-diff --git a/device.env.example b/device.env.example
-new file mode 100644
-index 0000000..9cf75a3
---- /dev/null
-+++ b/device.env.example
-@@ -0,0 +1,5 @@
-+# Copy required values to ~/.config/yishijieyongzhe/device.env.
-+ADB_DEVICE=
-+PAD_SERIAL=
-+PAD_IP=
-+PAD_MODEL=
-diff --git a/docs/WORKFLOW.md b/docs/WORKFLOW.md
-index 09a6c53..fad521f 100644
---- a/docs/WORKFLOW.md
-+++ b/docs/WORKFLOW.md
-@@ -93,3 +93,48 @@ git diff <上一已验收commit>..<当前commit>
- - Token、密码、Gitee PAT、签名文件、`local.properties`、环境变量文件及其他凭据禁止提交。
- - 提交前检查 `git status`、暂存区差异和敏感信息。
- - 诊断数据提交前必须确认不含账号、设备标识、凭据和其他隐私信息。
++    val canRequestResume: Boolean get() =
++        automationState == AutomationState.PAUSED &&
++            recoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION &&
++            accessibilityEnabled &&
++            captureState is ScreenCaptureState.Active &&
++            targetVisible &&
+             windowGate == WindowGate.MATCHED
+ }
+ 
+@@ -54,6 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     private val stateMachine = AutomationStateMachine()
+     private val windowMonitor = WindowMonitor()
+     private val captureController: ScreenCaptureController = MediaProjectionScreenCaptureController(appContext)
++    private var targetActivationTimeout: Job? = null
+     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
+     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
+ 
+@@ -99,7 +111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             record("PRECHECK", "PERMISSION_REQUIRED")
+             return
+         }
+-        if (!snapshot.targetDetected || snapshot.windowBounds == null || windowMonitor.accept(snapshot.windowBounds) != WindowGate.MATCHED) {
++        if (!snapshot.targetVisible || snapshot.windowBounds == null || windowMonitor.accept(snapshot.windowBounds) != WindowGate.MATCHED) {
+             stateMachine.dispatch(AutomationEvent.Fail("ENV_TARGET_WINDOW_NOT_READY"))
+             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
+             return
+@@ -112,17 +124,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+ 
+     fun beginPlaceholder() {
+         refresh()
+-        if (!mutableUiState.value.canBeginPlaceholder) {
+-            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
++        if (!mutableUiState.value.canArmPlaceholder) {
+             record("AUTOMATION_PLACEHOLDER", "BLOCKED", "ENVIRONMENT_CHANGED")
+             return
+         }
+         if (stateMachine.dispatch(AutomationEvent.BeginPlaceholder)) {
+-            record("AUTOMATION_PLACEHOLDER", "STARTED")
++            record("AUTOMATION_PLACEHOLDER", "ARMED")
++            scheduleTargetActivationTimeout()
++        }
++    }
 +
-+## Public Repository Security Policy
++    fun requestResumePlaceholder() {
++        refresh()
++        if (!mutableUiState.value.canRequestResume) {
++            record("AUTOMATION_PLACEHOLDER", "RESUME_BLOCKED", "ENVIRONMENT_RECHECK_REQUIRED")
++            return
++        }
++        if (stateMachine.dispatch(AutomationEvent.RequestResume)) {
++            record("AUTOMATION_PLACEHOLDER", "RESUME_ARMED")
++            scheduleTargetActivationTimeout()
++        }
++    }
 +
-+### 数据边界
++    private fun scheduleTargetActivationTimeout() {
++        targetActivationTimeout?.cancel()
++        targetActivationTimeout = viewModelScope.launch {
++            delay(targetActivationTimeoutMillis)
++            if (stateMachine.dispatch(AutomationEvent.TargetActivationTimedOut)) {
++                record("AUTOMATION_PLACEHOLDER", "PAUSED", "TARGET_ACTIVATION_TIMEOUT")
++            }
+         }
+     }
+ 
+     fun stop() {
++        targetActivationTimeout?.cancel()
+         stateMachine.dispatch(AutomationEvent.Stop)
+         captureController.stop()
+         record("STOP", "STOPPED")
+@@ -131,28 +166,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     private fun refresh() {
+         val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
+         val service = GameAccessibilityService.instance
+-        val activePackage = service?.activeWindowPackage()
+         val targetWindow = service
+             ?.queryWindows()
+-            ?.firstOrNull {
++            ?.filter {
+                 configuredPackage.isNotBlank() &&
+-                    it.packageName == configuredPackage &&
+-                    (it.isActive || it.isFocused)
++                    it.packageName == configuredPackage
+             }
+-        val targetDetected = configuredPackage.isNotBlank() && activePackage == configuredPackage && targetWindow != null
++            ?.maxByOrNull { it.layer }
++        val targetVisible = targetWindow != null
++        val targetActive = targetWindow?.let { it.isActive || it.isFocused } ?: false
+         val gate = windowMonitor.observe(targetWindow?.bounds)
+-        if (gate in setOf(WindowGate.CHANGED, WindowGate.UNAVAILABLE) && stateMachine.state.value in setOf(AutomationState.READY, AutomationState.RUNNING_PLACEHOLDER)) {
+-            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
+-            record("WINDOW_MONITOR", "BLOCKED", "WINDOW_${gate.name}")
++        val currentState = stateMachine.state.value
++        val captureActive = captureController.state.value is ScreenCaptureState.Active
++        val accessibilityEnabled = GameAccessibilityService.connected.value
++        val handshakeStates = setOf(
++            AutomationState.WAIT_TARGET_ACTIVE,
++            AutomationState.RUNNING_PLACEHOLDER,
++            AutomationState.PAUSED,
++        )
++        val environmentChangeReason = when {
++            gate == WindowGate.CHANGED -> EnvironmentChangeReason.WINDOW_CHANGED
++            gate == WindowGate.UNAVAILABLE -> EnvironmentChangeReason.WINDOW_UNAVAILABLE
++            !captureActive -> EnvironmentChangeReason.CAPTURE_INACTIVE
++            !accessibilityEnabled -> EnvironmentChangeReason.ACCESSIBILITY_UNAVAILABLE
++            else -> null
++        }
++        if (
++            environmentChangeReason != null &&
++            (currentState in handshakeStates || currentState == AutomationState.READY)
++        ) {
++            stateMachine.dispatch(AutomationEvent.EnvironmentChanged(environmentChangeReason))
++            record("WINDOW_MONITOR", "BLOCKED", environmentChangeReason.name)
++        } else if (currentState == AutomationState.RUNNING_PLACEHOLDER && !targetActive) {
++            stateMachine.dispatch(AutomationEvent.EnvironmentChanged(EnvironmentChangeReason.TARGET_NOT_ACTIVE))
++            record("WINDOW_MONITOR", "BLOCKED", EnvironmentChangeReason.TARGET_NOT_ACTIVE.name)
++        }
++        if (stateMachine.state.value == AutomationState.WAIT_TARGET_ACTIVE && targetActive && gate == WindowGate.MATCHED && captureActive) {
++            targetActivationTimeout?.cancel()
++            if (stateMachine.dispatch(AutomationEvent.TargetActivated)) {
++                record("AUTOMATION_PLACEHOLDER", "STARTED")
++            }
+         }
+         val priorInput = mutableUiState.value.targetPackageInput
+         mutableUiState.value = EnvironmentUiState(
+             automationState = stateMachine.state.value,
+-            accessibilityEnabled = isAccessibilityEnabled(),
++            recoveryRequirement = stateMachine.recoveryRequirement,
++            accessibilityEnabled = accessibilityEnabled,
+             captureState = captureController.state.value,
+             latestFrameBytes = captureController.latestFrame.value?.rgba?.size ?: 0,
+             targetPackageInput = priorInput.ifBlank { configuredPackage },
+-            targetDetected = targetDetected,
++            targetVisible = targetVisible,
++            targetActive = targetActive,
+             windowBounds = targetWindow?.bounds,
+             windowGate = gate,
+             deviceSummary = deviceSummary(),
+@@ -160,22 +224,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         )
+     }
+ 
+-    private fun isAccessibilityEnabled(): Boolean {
+-        if (GameAccessibilityService.connected.value) return true
+-        val expected = ComponentName(appContext, GameAccessibilityService::class.java)
+-        val manager = appContext.getSystemService(AccessibilityManager::class.java)
+-        val reportedByManager = manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any { service ->
+-            val info = service.resolveInfo.serviceInfo
+-            ComponentName(info.packageName, info.name) == expected
+-        }
+-        if (reportedByManager) return true
+-        return Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+-            ?.split(':')
+-            ?.mapNotNull(ComponentName::unflattenFromString)
+-            ?.any { it == expected }
+-            ?: false
+-    }
+-
+     private fun record(eventType: String, result: String, errorCode: String? = null) {
+         DiagnosticRecorder.record(
+             DiagnosticEvent(
+@@ -192,5 +240,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+ 
+     companion object {
+         private const val targetPackageKey = "target_game_package"
++        private const val targetActivationTimeoutMillis = 30_000L
+     }
+ }
+diff --git a/app/src/main/java/com/lidquan/yishigame/accessibility/GameAccessibilityService.kt b/app/src/main/java/com/lidquan/yishigame/accessibility/GameAccessibilityService.kt
+index 0a323e1..716ecab 100644
+--- a/app/src/main/java/com/lidquan/yishigame/accessibility/GameAccessibilityService.kt
++++ b/app/src/main/java/com/lidquan/yishigame/accessibility/GameAccessibilityService.kt
+@@ -2,8 +2,10 @@ package com.lidquan.yishigame.accessibility
+ 
+ import android.accessibilityservice.AccessibilityService
+ import android.accessibilityservice.GestureDescription
++import android.content.Intent
+ import android.graphics.Path
+ import android.graphics.Rect
++import android.util.Log
+ import android.view.accessibility.AccessibilityEvent
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+@@ -11,20 +13,34 @@ import kotlinx.coroutines.flow.asStateFlow
+ import com.lidquan.yishigame.automation.WindowBounds
+ 
+ class GameAccessibilityService : AccessibilityService(), AccessibilityController {
++    private val windowPackages = mutableMapOf<Int, String>()
 +
-+Gitee 公开仓库允许保存：
+     override fun onServiceConnected() {
++        super.onServiceConnected()
+         instance = this
+         mutableConnected.value = true
++        Log.i(logTag, "service connected")
+     }
+ 
+     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+-        event?.packageName?.toString()?.let { mutableLastEventPackage.value = it }
++        val packageName = event?.packageName?.toString() ?: return
++        mutableLastEventPackage.value = packageName
++        if (event.windowId >= 0) windowPackages[event.windowId] = packageName
+     }
+ 
+     override fun onInterrupt() = Unit
+ 
++    override fun onUnbind(intent: Intent?): Boolean {
++        if (instance === this) instance = null
++        mutableConnected.value = false
++        Log.i(logTag, "service unbound")
++        return super.onUnbind(intent)
++    }
 +
-+- 源码、开发文档、需求和 Review
-+- 已脱敏的实施报告、交接文件和问题摘要
-+- 不含真实值的配置模板
-+- 已确认不含个人、账号、设备或网络标识的攻略与技能数据库
-+
-+Mac 本地 `~/.config/yishijieyongzhe/` 保存：
-+
-+- Token、密码、Cookie、Session、OAuth 和其他 Secret
-+- 设备凭据、ADB 地址、配对码、序列号和网络信息
-+- 完整日志、原始 logcat、crash dump 和错误截图
-+- APK 签名文件、keystore 及其密码
-+
-+敏感目录和文件权限应分别设置为 `700` 和 `600`。长期保存的 PAT、API Token 和签名密码优先使用 macOS Keychain；需要读取配置时按以下顺序处理：
-+
-+1. Environment Variables
-+2. macOS Keychain
-+3. `~/.config/yishijieyongzhe/*.env`
-+4. 安全默认值或仅报告缺失的配置项名称
-+
-+任何 Secret 均不得写入源码、文档、报告、交接文件、提交信息或普通日志，也不得在错误信息中回显。业务代码应通过统一配置读取层访问敏感信息。
-+
-+### 日志、诊断和截图
-+
-+- 完整日志、原始 logcat、crash dump 和错误截图默认只保存在本地私有目录。
-+- 公开仓库仅保存错误编号、状态机节点、非敏感错误信息和已脱敏诊断字段。
-+- 截图提交前必须人工检查账号、昵称、通知、网络信息、Token、聊天内容、二维码和个人数据并完成脱敏。
-+- 二进制截图无法由文本扫描器可靠验证，必须保留人工复核环节。
-+- 仓库公开前必须检查 Git 作者姓名和邮箱等提交元数据；如需隐藏，应先配置公开安全的身份，再经用户确认后重写历史。
-+
-+### 提交前安全检查
-+
-+每次提交和生成公开交接材料前执行：
-+
-+```bash
-+python3 tools/security/check_public_repo.py --history
-+```
-+
-+扫描失败时必须阻止提交，只报告规则名、文件和行号，不得回显匹配内容。若真实 Secret 曾进入 Git 历史，应立即作废并重新生成；历史重写必须在用户明确确认后进行。
-diff --git a/docs/requirements/REQ-0002.md b/docs/requirements/REQ-0002.md
-new file mode 100644
-index 0000000..8fb0513
---- /dev/null
-+++ b/docs/requirements/REQ-0002.md
-@@ -0,0 +1,29 @@
-+# REQ-0002：公开仓库安全改造
-+
-+## 背景
-+
-+Gitee 仓库即将公开，需要确保当前文件、暂存内容和 Git 历史不包含真实敏感信息，并为后续提交建立可重复执行的安全检查。
-+
-+## 目标
-+
-+- 强化 `.gitignore`，隔离凭据、签名材料、设备数据、私有运行数据和生成物。
-+- 建立 `~/.config/yishijieyongzhe/` 本地敏感数据边界。
-+- 提供只含假值或空值的公开配置样例。
-+- 增加公开仓库安全扫描脚本，同时检查工作区、暂存区和完整 Git 历史。
-+- 在协作协议中明确公开仓库安全政策。
-+
-+## 验收标准
-+
-+- `python3 tools/security/check_public_repo.py --self-test` 通过。
-+- `python3 tools/security/check_public_repo.py --history` 通过。
-+- 扫描发现问题时只输出规则、文件和行号，不输出匹配值。
-+- Git 历史中不存在已识别的 Token、密码、私钥、签名文件、设备信息、原始日志或敏感截图。
-+- 本地敏感目录权限为 `700`；已有本地 env 文件权限为 `600`。
-+- 生成 `codex/reports/IMPLEMENT-0002.md` 和更新后的 `codex/handoff/LATEST.md`。
-+- 变更提交并成功推送到 Gitee。
-+
-+## 限制
-+
-+- 不读取或展示本地 Secret 的内容。
-+- 不自动重写 Git 历史；发现历史 Secret 时先报告并要求用户撤销对应凭据。
-+- 二进制截图必须人工复核，文本扫描不能替代人工脱敏确认。
-diff --git a/tools/security/check_public_repo.py b/tools/security/check_public_repo.py
-new file mode 100755
-index 0000000..1275106
---- /dev/null
-+++ b/tools/security/check_public_repo.py
-@@ -0,0 +1,275 @@
-+#!/usr/bin/env python3
-+"""Scan public Git candidates without printing matched secret values."""
-+
-+from __future__ import annotations
-+
-+import argparse
-+import hashlib
-+import os
-+import re
-+import subprocess
-+import sys
-+from dataclasses import dataclass
-+from pathlib import Path
-+from typing import Iterable, Iterator
-+
-+
-+ROOT = Path(__file__).resolve().parents[2]
-+MAX_TEXT_BYTES = 5 * 1024 * 1024
-+ALLOW_MARKER = "public-scan: allow"
-+
-+SENSITIVE_NAMES = {
-+    "local.properties",
-+    "keystore.properties",
-+    "signing.properties",
-+    "secrets.properties",
-+    "gitee_pat.txt",
-+    "credentials.json",
-+    "credentials.yml",
-+    "credentials.yaml",
-+    "cookies.txt",
-+    "session.json",
-+    "auth.json",
-+    "id_rsa",
-+    "id_ed25519",
-+    "id_ecdsa",
+     override fun onDestroy() {
+         if (instance === this) instance = null
+         mutableConnected.value = false
++        windowPackages.clear()
+         super.onDestroy()
+     }
+ 
+@@ -54,7 +70,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
+     override fun queryWindows(): List<AccessibleWindow> = windows.mapNotNull { window ->
+         val rect = Rect()
+         window.getBoundsInScreen(rect)
+-        val packageName = window.root?.packageName?.toString()
++        val packageName = window.root?.packageName?.toString() ?: windowPackages[window.id]
+         if (rect.isEmpty) null else AccessibleWindow(
+             packageName = packageName,
+             bounds = WindowBounds(rect.left, rect.top, rect.right, rect.bottom),
+@@ -68,6 +84,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
+     override fun activeWindowPackage(): String? = rootInActiveWindow?.packageName?.toString()
+ 
+     companion object {
++        private const val logTag = "YishiAccessibility"
+         @Volatile
+         var instance: GameAccessibilityService? = null
+             private set
+diff --git a/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt b/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
+index 1073035..b4350c9 100644
+--- a/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
++++ b/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
+@@ -7,12 +7,27 @@ enum class AutomationState {
+     DEVICE_READY,
+     WINDOW_CHECK,
+     READY,
++    WAIT_TARGET_ACTIVE,
+     RUNNING_PLACEHOLDER,
+     PAUSED,
+     ERROR,
+     STOPPED,
+ }
+ 
++enum class RecoveryRequirement {
++    NONE,
++    EXPLICIT_CONFIRMATION,
++    ENVIRONMENT_CHECK,
 +}
-+SENSITIVE_SUFFIXES = {
-+    ".jks",
-+    ".keystore",
-+    ".pem",
-+    ".key",
-+    ".p12",
-+    ".pfx",
-+    ".secret",
-+    ".token",
-+    ".logcat",
-+    ".dump",
-+    ".dmp",
-+    ".hprof",
++
++enum class EnvironmentChangeReason {
++    TARGET_NOT_ACTIVE,
++    WINDOW_CHANGED,
++    WINDOW_UNAVAILABLE,
++    CAPTURE_INACTIVE,
++    ACCESSIBILITY_UNAVAILABLE,
 +}
-+SENSITIVE_PARTS = {"secrets", "private", "adb", "device-dumps", "uiautomator", "logcat", "crash-dumps", "tombstones"}
-+EXAMPLE_ENV_NAMES = {".env.example", "device.env.example"}
 +
-+PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")  # public-scan: allow
-+BEARER = re.compile(r"(?i)\bbearer\s+(?P<value>[A-Za-z0-9._~+/=-]{12,})")
-+PRIVATE_IP = re.compile(r"(?<![\d.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\d.])")
-+MAC_ADDRESS = re.compile(r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f])")
-+LOCAL_USER_PATH = re.compile(r"/Users/(?P<value>[^/\s]+)/")  # public-scan: allow
-+URL_CREDENTIALS = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@", re.IGNORECASE)
-+SECRET_ASSIGNMENT = re.compile(
-+    r"(?i)[\"']?[A-Z][A-Z0-9_.-]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API[_-]?KEY|PRIVATE[_-]?KEY|AUTHORIZATION|COOKIE|SESSION|KEY[_-]?ALIAS)[A-Z0-9_.-]*[\"']?"
-+    r"\s*[:=]\s*[\"']?(?P<value>[^\"'\s,}#]+)"
-+)
-+DEVICE_ASSIGNMENT = re.compile(
-+    r"(?i)[\"']?(?:ADB_DEVICE|PAD_SERIAL|DEVICE_SERIAL|PAD_IP|ADB_IP)[\"']?"
-+    r"\s*[:=]\s*[\"']?(?P<value>[^\"'\s,}#]+)"
-+)
-+COMMON_SECRETS = (
-+    ("aws-access-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,255}\b")),
-+    ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,255}\b")),
-+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
-+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
-+)
+ sealed interface AutomationEvent {
+     data object StartPrecheck : AutomationEvent
+     data object PermissionMissing : AutomationEvent
+@@ -20,9 +35,11 @@ sealed interface AutomationEvent {
+     data object CheckWindow : AutomationEvent
+     data object WindowVerified : AutomationEvent
+     data object BeginPlaceholder : AutomationEvent
++    data object TargetActivated : AutomationEvent
++    data object TargetActivationTimedOut : AutomationEvent
++    data object RequestResume : AutomationEvent
+     data object Pause : AutomationEvent
+-    data object Resume : AutomationEvent
+-    data object EnvironmentChanged : AutomationEvent
++    data class EnvironmentChanged(val reason: EnvironmentChangeReason) : AutomationEvent
+     data object Stop : AutomationEvent
+     data object Reset : AutomationEvent
+     data class Fail(val errorCode: String) : AutomationEvent
+diff --git a/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt b/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
+index e75c816..e721802 100644
+--- a/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
++++ b/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
+@@ -7,15 +7,46 @@ import kotlinx.coroutines.flow.asStateFlow
+ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDLE) {
+     private val mutableState = MutableStateFlow(initialState)
+     val state: StateFlow<AutomationState> = mutableState.asStateFlow()
++    private var mutableRecoveryRequirement = RecoveryRequirement.NONE
++    val recoveryRequirement: RecoveryRequirement
++        @Synchronized get() = mutableRecoveryRequirement
+ 
+     @Synchronized
+     fun dispatch(event: AutomationEvent): Boolean {
+         val current = mutableState.value
+         val next = transition(current, event) ?: return false
++        updateRecoveryRequirement(current, event, next)
+         mutableState.value = next
+         return true
+     }
+ 
++    private fun updateRecoveryRequirement(current: AutomationState, event: AutomationEvent, next: AutomationState) {
++        if (next in setOf(AutomationState.IDLE, AutomationState.STOPPED)) {
++            mutableRecoveryRequirement = RecoveryRequirement.NONE
++            return
++        }
++        when (event) {
++            AutomationEvent.WindowVerified -> mutableRecoveryRequirement = RecoveryRequirement.NONE
++            AutomationEvent.Pause,
++            AutomationEvent.TargetActivationTimedOut -> mutableRecoveryRequirement = RecoveryRequirement.EXPLICIT_CONFIRMATION
++            AutomationEvent.RequestResume,
++            AutomationEvent.TargetActivated -> mutableRecoveryRequirement = RecoveryRequirement.NONE
++            is AutomationEvent.EnvironmentChanged -> {
++                val required = if (event.reason == EnvironmentChangeReason.TARGET_NOT_ACTIVE) {
++                    RecoveryRequirement.EXPLICIT_CONFIRMATION
++                } else {
++                    RecoveryRequirement.ENVIRONMENT_CHECK
++                }
++                if (current != AutomationState.PAUSED || required == RecoveryRequirement.ENVIRONMENT_CHECK) {
++                    mutableRecoveryRequirement = required
++                }
++            }
++            else -> if (next == AutomationState.ERROR) {
++                mutableRecoveryRequirement = RecoveryRequirement.ENVIRONMENT_CHECK
++            }
++        }
++    }
 +
+     internal fun transition(current: AutomationState, event: AutomationEvent): AutomationState? {
+         if (current == AutomationState.STOPPED) {
+             return when (event) {
+@@ -33,12 +64,19 @@ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDL
+         AutomationEvent.DeviceReady -> if (current in setOf(AutomationState.PRECHECK, AutomationState.PERMISSION_REQUIRED)) AutomationState.DEVICE_READY else null
+         AutomationEvent.CheckWindow -> if (current == AutomationState.DEVICE_READY) AutomationState.WINDOW_CHECK else null
+         AutomationEvent.WindowVerified -> if (current == AutomationState.WINDOW_CHECK) AutomationState.READY else null
+-        AutomationEvent.BeginPlaceholder -> if (current == AutomationState.READY) AutomationState.RUNNING_PLACEHOLDER else null
++        AutomationEvent.BeginPlaceholder -> if (current == AutomationState.READY) AutomationState.WAIT_TARGET_ACTIVE else null
++        AutomationEvent.TargetActivated -> if (current == AutomationState.WAIT_TARGET_ACTIVE) AutomationState.RUNNING_PLACEHOLDER else null
++        AutomationEvent.TargetActivationTimedOut -> if (current == AutomationState.WAIT_TARGET_ACTIVE) AutomationState.PAUSED else null
++        AutomationEvent.RequestResume -> if (
++            current == AutomationState.PAUSED &&
++            mutableRecoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION
++        ) AutomationState.WAIT_TARGET_ACTIVE else null
+         AutomationEvent.Pause -> if (current == AutomationState.RUNNING_PLACEHOLDER) AutomationState.PAUSED else null
+-        AutomationEvent.Resume -> if (current == AutomationState.PAUSED) AutomationState.READY else null
+-        AutomationEvent.EnvironmentChanged -> when (current) {
++        is AutomationEvent.EnvironmentChanged -> when (current) {
+             AutomationState.READY -> AutomationState.WINDOW_CHECK
+-            AutomationState.RUNNING_PLACEHOLDER -> AutomationState.PAUSED
++            AutomationState.WAIT_TARGET_ACTIVE,
++            AutomationState.RUNNING_PLACEHOLDER,
++            AutomationState.PAUSED -> AutomationState.PAUSED
+             else -> null
+         }
+         }
+diff --git a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+index 2ed913e..3a84c55 100644
+--- a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
++++ b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+@@ -30,6 +30,8 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.unit.dp
+ import com.lidquan.yishigame.EnvironmentUiState
+ import com.lidquan.yishigame.MainViewModel
++import com.lidquan.yishigame.automation.AutomationState
++import com.lidquan.yishigame.automation.RecoveryRequirement
+ import com.lidquan.yishigame.capture.ScreenCaptureState
+ 
+ @Composable
+@@ -104,7 +106,14 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
+             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
+             StatusRow("屏幕采集", captureLabel(state.captureState))
+             StatusRow("最新帧", state.latestFrameBytes.takeIf { it > 0 }?.let { "$it 字节" } ?: "无")
+-            StatusRow("目标游戏", if (state.targetDetected) "前台已识别" else "未识别")
++            StatusRow(
++                "目标游戏",
++                when {
++                    state.targetActive -> "可见 · 前台已激活"
++                    state.targetVisible -> "可见 · 请切回游戏"
++                    else -> "未识别"
++                },
++            )
+             StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowGate}" } ?: state.windowGate.name)
+             StatusRow("设备摘要", state.deviceSummary)
+         }
+@@ -140,9 +149,24 @@ private fun Controls(
+             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
+             Button(
+                 onClick = viewModel::beginPlaceholder,
+-                enabled = state.canBeginPlaceholder,
++                enabled = state.canArmPlaceholder,
+                 modifier = Modifier.fillMaxWidth(),
+-            ) { Text("开始自动化（M0 占位）") }
++            ) { Text("准备启动（M0 占位）") }
++            if (state.automationState == AutomationState.WAIT_TARGET_ACTIVE) {
++                Text("握手第 2 阶段：请切回游戏窗口；只有窗口、焦点和采集状态均通过检查后才会继续。", color = MaterialTheme.colorScheme.primary)
++            }
++            if (state.automationState == AutomationState.PAUSED) {
++                if (state.recoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION) {
++                    Text("已暂停。恢复必须由你显式发起，然后再切回游戏完成安全握手。")
++                    Button(
++                        onClick = viewModel::requestResumePlaceholder,
++                        enabled = state.canRequestResume,
++                        modifier = Modifier.fillMaxWidth(),
++                    ) { Text("显式恢复并重新握手") }
++                } else {
++                    Text("窗口、采集或辅助功能环境发生变化，不能直接恢复；处理后请重新执行环境检查。")
++                }
++            }
+             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
+             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
+         }
+diff --git a/app/src/test/java/com/lidquan/yishigame/EnvironmentUiStateTest.kt b/app/src/test/java/com/lidquan/yishigame/EnvironmentUiStateTest.kt
+index c02e0b1..6d98b0b 100644
+--- a/app/src/test/java/com/lidquan/yishigame/EnvironmentUiStateTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/EnvironmentUiStateTest.kt
+@@ -1,6 +1,7 @@
+ package com.lidquan.yishigame
+ 
+ import com.lidquan.yishigame.automation.AutomationState
++import com.lidquan.yishigame.automation.RecoveryRequirement
+ import com.lidquan.yishigame.automation.WindowGate
+ import com.lidquan.yishigame.capture.ScreenCaptureState
+ import org.junit.Assert.assertFalse
+@@ -12,15 +13,33 @@ class EnvironmentUiStateTest {
+         automationState = AutomationState.READY,
+         accessibilityEnabled = true,
+         captureState = ScreenCaptureState.Active(100, 100, 1),
+-        targetDetected = true,
++        targetVisible = true,
++        targetActive = true,
+         windowGate = WindowGate.MATCHED,
+     )
+ 
+     @Test
+-    fun `only a matched active target can begin`() {
+-        assertTrue(readyEnvironment.canBeginPlaceholder)
+-        assertFalse(readyEnvironment.copy(windowGate = WindowGate.CHANGED).canBeginPlaceholder)
+-        assertFalse(readyEnvironment.copy(windowGate = WindowGate.UNAVAILABLE).canBeginPlaceholder)
+-        assertFalse(readyEnvironment.copy(targetDetected = false).canBeginPlaceholder)
++    fun `visible matched target can arm while assistant has focus`() {
++        assertTrue(readyEnvironment.canArmPlaceholder)
++        assertFalse(readyEnvironment.copy(windowGate = WindowGate.CHANGED).canArmPlaceholder)
++        assertFalse(readyEnvironment.copy(windowGate = WindowGate.UNAVAILABLE).canArmPlaceholder)
++        assertTrue(readyEnvironment.copy(targetActive = false).canArmPlaceholder)
++        assertFalse(readyEnvironment.copy(targetVisible = false).canArmPlaceholder)
++    }
 +
-+@dataclass(frozen=True)
-+class Finding:
-+    source: str
-+    line: int
-+    rule: str
++    @Test
++    fun `explicit resume requires a safe environment and prior user confirmation`() {
++        val paused = readyEnvironment.copy(
++            automationState = AutomationState.PAUSED,
++            targetActive = false,
++            recoveryRequirement = RecoveryRequirement.EXPLICIT_CONFIRMATION,
++        )
 +
++        assertTrue(paused.canRequestResume)
++        assertFalse(paused.copy(recoveryRequirement = RecoveryRequirement.ENVIRONMENT_CHECK).canRequestResume)
++        assertFalse(paused.copy(captureState = ScreenCaptureState.Stopped("test")).canRequestResume)
++        assertFalse(paused.copy(windowGate = WindowGate.CHANGED).canRequestResume)
++        assertFalse(paused.copy(targetVisible = false).canRequestResume)
++        assertFalse(paused.copy(accessibilityEnabled = false).canRequestResume)
+     }
+ }
+diff --git a/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt b/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
+index 598febb..1d4e043 100644
+--- a/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
+@@ -7,7 +7,7 @@ import org.junit.Test
+ 
+ class AutomationStateMachineTest {
+     @Test
+-    fun `happy path reaches placeholder without executing game actions`() {
++    fun `arming waits for target activation before reaching placeholder`() {
+         val machine = AutomationStateMachine()
+ 
+         assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
+@@ -15,10 +15,66 @@ class AutomationStateMachineTest {
+         assertTrue(machine.dispatch(AutomationEvent.CheckWindow))
+         assertTrue(machine.dispatch(AutomationEvent.WindowVerified))
+         assertTrue(machine.dispatch(AutomationEvent.BeginPlaceholder))
++        assertEquals(AutomationState.WAIT_TARGET_ACTIVE, machine.state.value)
++        assertTrue(machine.dispatch(AutomationEvent.TargetActivated))
+ 
+         assertEquals(AutomationState.RUNNING_PLACEHOLDER, machine.state.value)
+     }
+ 
++    @Test
++    fun `arming times out safely without executing game actions`() {
++        val machine = AutomationStateMachine(AutomationState.WAIT_TARGET_ACTIVE)
 +
-+def git(*args: str) -> bytes:
-+    return subprocess.run(
-+        ["git", "-C", str(ROOT), *args],
-+        check=True,
-+        stdout=subprocess.PIPE,
-+        stderr=subprocess.PIPE,
-+    ).stdout
++        assertTrue(machine.dispatch(AutomationEvent.TargetActivationTimedOut))
 +
++        assertEquals(AutomationState.PAUSED, machine.state.value)
++        assertEquals(RecoveryRequirement.EXPLICIT_CONFIRMATION, machine.recoveryRequirement)
++        assertTrue(machine.dispatch(AutomationEvent.RequestResume))
++        assertEquals(AutomationState.WAIT_TARGET_ACTIVE, machine.state.value)
++    }
 +
-+def placeholder(value: str) -> bool:
-+    value = value.strip().strip("\"'")
-+    upper = value.upper()
-+    if not value or value[0] in "$<[{(":
-+        return True
-+    if upper.startswith(("YOUR_", "EXAMPLE", "REDACTED", "CHANGE_ME", "CHANGEME", "PLACEHOLDER", "NOT_SET")):
-+        return True
-+    if upper in {"NONE", "NULL", "N/A"} or set(upper) <= {"X", "_", "-"}:
-+        return True
-+    if re.fullmatch(r"(?:\d{1,3}\.){2,3}x(?:\.x)*", value, re.IGNORECASE):
-+        return True
-+    return value.startswith(("os.", "env.", "process.env", "System.getenv", "getenv(", "settings."))
++    @Test
++    fun `active run pauses when the target loses focus`() {
++        val machine = AutomationStateMachine(AutomationState.RUNNING_PLACEHOLDER)
 +
++        assertTrue(machine.dispatch(AutomationEvent.EnvironmentChanged(EnvironmentChangeReason.TARGET_NOT_ACTIVE)))
 +
-+def path_rule(path: str) -> str | None:
-+    normalized = path.replace("\\", "/")
-+    parts = set(Path(normalized).parts)
-+    name = Path(normalized).name
-+    suffix = Path(normalized).suffix.lower()
-+    if name in EXAMPLE_ENV_NAMES:
-+        return None
-+    if name in SENSITIVE_NAMES or suffix in SENSITIVE_SUFFIXES:
-+        return "sensitive-file"
-+    if name.endswith(".env") or (name.startswith(".env.") and name != ".env.example"):
-+        return "environment-file"
-+    if parts & SENSITIVE_PARTS or normalized.endswith(".log"):
-+        return "private-runtime-data"
-+    return None
++        assertEquals(AutomationState.PAUSED, machine.state.value)
++        assertEquals(RecoveryRequirement.EXPLICIT_CONFIRMATION, machine.recoveryRequirement)
++        assertFalse(machine.dispatch(AutomationEvent.TargetActivated))
++        assertEquals(AutomationState.PAUSED, machine.state.value)
++        assertTrue(machine.dispatch(AutomationEvent.RequestResume))
++        assertEquals(AutomationState.WAIT_TARGET_ACTIVE, machine.state.value)
++        assertTrue(machine.dispatch(AutomationEvent.TargetActivated))
++        assertEquals(AutomationState.RUNNING_PLACEHOLDER, machine.state.value)
++    }
 +
++    @Test
++    fun `window and capture failures require a complete environment check before resume`() {
++        for (reason in listOf(
++            EnvironmentChangeReason.WINDOW_CHANGED,
++            EnvironmentChangeReason.WINDOW_UNAVAILABLE,
++            EnvironmentChangeReason.CAPTURE_INACTIVE,
++            EnvironmentChangeReason.ACCESSIBILITY_UNAVAILABLE,
++        )) {
++            val machine = AutomationStateMachine(AutomationState.RUNNING_PLACEHOLDER)
++            assertTrue(machine.dispatch(AutomationEvent.EnvironmentChanged(reason)))
++            assertEquals(AutomationState.PAUSED, machine.state.value)
++            assertEquals(RecoveryRequirement.ENVIRONMENT_CHECK, machine.recoveryRequirement)
++            assertFalse(machine.dispatch(AutomationEvent.RequestResume))
 +
-+def scan_text(source: str, text: str) -> list[Finding]:
-+    findings: list[Finding] = []
-+    for number, line in enumerate(text.splitlines(), 1):
-+        if ALLOW_MARKER in line:
-+            continue
-+        if PRIVATE_KEY.search(line):
-+            findings.append(Finding(source, number, "private-key"))
-+        if URL_CREDENTIALS.search(line):
-+            findings.append(Finding(source, number, "url-credentials"))
-+        if PRIVATE_IP.search(line):
-+            findings.append(Finding(source, number, "private-ip"))
-+        if MAC_ADDRESS.search(line):
-+            findings.append(Finding(source, number, "mac-address"))
-+        local_path = LOCAL_USER_PATH.search(line)
-+        if local_path and local_path.group("value").lower() not in {"xxx", "user", "username", "your_user"}:
-+            findings.append(Finding(source, number, "local-user-path"))
-+        for rule, pattern in COMMON_SECRETS:
-+            if pattern.search(line):
-+                findings.append(Finding(source, number, rule))
-+        for rule, pattern in (("secret-assignment", SECRET_ASSIGNMENT), ("device-assignment", DEVICE_ASSIGNMENT), ("bearer-token", BEARER)):
-+            match = pattern.search(line)
-+            if match and not placeholder(match.group("value")):
-+                findings.append(Finding(source, number, rule))
-+    return findings
++            assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
++            assertTrue(machine.dispatch(AutomationEvent.DeviceReady))
++            assertTrue(machine.dispatch(AutomationEvent.CheckWindow))
++            assertTrue(machine.dispatch(AutomationEvent.WindowVerified))
++            assertEquals(RecoveryRequirement.NONE, machine.recoveryRequirement)
++            assertEquals(AutomationState.READY, machine.state.value)
++            assertFalse(machine.dispatch(AutomationEvent.RequestResume))
++            assertTrue(machine.dispatch(AutomationEvent.BeginPlaceholder))
++            assertEquals(AutomationState.WAIT_TARGET_ACTIVE, machine.state.value)
++        }
++    }
 +
-+
-+def decode_text(data: bytes) -> str | None:
-+    if len(data) > MAX_TEXT_BYTES or b"\0" in data[:8192]:
-+        return None
-+    try:
-+        return data.decode("utf-8")
-+    except UnicodeDecodeError:
-+        return None
-+
-+
-+def public_candidates() -> Iterator[tuple[str, str, bytes]]:
-+    seen: set[tuple[str, bytes]] = set()
-+    paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
-+    for raw_path in paths:
-+        if not raw_path:
-+            continue
-+        path = raw_path.decode("utf-8", "surrogateescape")
-+        full_path = ROOT / path
-+        if not full_path.exists() and not full_path.is_symlink():
-+            continue
-+        data = os.readlink(full_path).encode() if full_path.is_symlink() else full_path.read_bytes()
-+        digest = hashlib.sha256(data).digest()
-+        seen.add((path, digest))
-+        yield path, path, data
-+
-+    for entry in git("ls-files", "-s", "-z").split(b"\0"):
-+        if not entry:
-+            continue
-+        metadata, raw_path = entry.split(b"\t", 1)
-+        mode, blob, stage = metadata.decode().split()
-+        if stage != "0" or mode == "160000":
-+            continue
-+        path = raw_path.decode("utf-8", "surrogateescape")
-+        data = git("cat-file", "blob", blob)
-+        digest = hashlib.sha256(data).digest()
-+        if (path, digest) not in seen:
-+            yield f"INDEX:{path}", path, data
-+
-+
-+def historical_candidates() -> Iterator[tuple[str, str, bytes]]:
-+    seen: set[tuple[str, str]] = set()
-+    for commit in git("rev-list", "--all").decode().splitlines():
-+        message = git("show", "-s", "--format=%B", commit)
-+        yield f"HISTORY:{commit[:12]}:COMMIT_MESSAGE", "COMMIT_MESSAGE", message
-+        for entry in git("ls-tree", "-r", "-z", commit).split(b"\0"):
-+            if not entry:
-+                continue
-+            metadata, raw_path = entry.split(b"\t", 1)
-+            _mode, kind, blob = metadata.decode().split()
-+            if kind != "blob":
-+                continue
-+            path = raw_path.decode("utf-8", "surrogateescape")
-+            identity = (path, blob)
-+            if identity in seen:
-+                continue
-+            seen.add(identity)
-+            yield f"HISTORY:{commit[:12]}:{path}", path, git("cat-file", "blob", blob)
-+
-+
-+def scan(candidates: Iterable[tuple[str, str, bytes]]) -> tuple[list[Finding], int, int]:
-+    findings: list[Finding] = []
-+    scanned = skipped = 0
-+    for source, path, data in candidates:
-+        rule = path_rule(path)
-+        if rule:
-+            findings.append(Finding(source, 0, rule))
-+        text = decode_text(data)
-+        if text is None:
-+            skipped += 1
-+            continue
-+        scanned += 1
-+        findings.extend(scan_text(source, text))
-+    return findings, scanned, skipped
-+
-+
-+def self_test() -> None:
-+    token_name = "GITEE_" + "TOKEN"
-+    device_name = "ADB_" + "DEVICE"
-+    ip_name = "PAD_" + "IP"
-+    safe = "\n".join((f"{token_name}=YOUR_TOKEN_HERE", f"{device_name}=", f"{ip_name}=192.168.x.x"))
-+    unsafe = f"{token_name}=" + "a" * 40 + f"\n{device_name}=" + "device-1234"
-+    assert not scan_text("safe", safe)
-+    rules = {finding.rule for finding in scan_text("unsafe", unsafe)}
-+    assert {"secret-assignment", "device-assignment"} <= rules
-+    assert path_rule("local.properties") == "sensitive-file"
-+    assert path_rule(".env.example") is None
-+    print("Security scanner self-test passed.")
-+
-+
-+def main() -> int:
-+    parser = argparse.ArgumentParser(description=__doc__)
-+    parser.add_argument("--history", action="store_true", help="also scan every blob reachable from Git history")
-+    parser.add_argument("--self-test", action="store_true", help="run built-in checks and exit")
-+    args = parser.parse_args()
-+
-+    if args.self_test:
-+        self_test()
-+        return 0
-+
-+    findings, current_count, current_skipped = scan(public_candidates())
-+    history_count = history_skipped = 0
-+    if args.history:
-+        historical, history_count, history_skipped = scan(historical_candidates())
-+        findings.extend(historical)
-+
-+    unique = sorted(set(findings), key=lambda item: (item.source, item.line, item.rule))
-+    if unique:
-+        print("Public repository security scan failed:")
-+        for finding in unique:
-+            location = f"{finding.source}:{finding.line}" if finding.line else finding.source
-+            print(f"- {location} [{finding.rule}]")
-+        print("Matched values are intentionally hidden.")
-+        return 1
-+
-+    print(
-+        "Public repository security scan passed: "
-+        f"{current_count} current/index text files, {history_count} historical text blobs; "
-+        f"{current_skipped + history_skipped} binary or oversized blobs skipped."
-+    )
-+    return 0
-+
-+
-+if __name__ == "__main__":
-+    try:
-+        raise SystemExit(main())
-+    except subprocess.CalledProcessError as error:
-+        print(f"Security scan could not run Git command: {error.cmd[2] if len(error.cmd) > 2 else 'unknown'}", file=sys.stderr)
-+        raise SystemExit(2)
+     @Test
+     fun `invalid transition is rejected`() {
+         val machine = AutomationStateMachine()

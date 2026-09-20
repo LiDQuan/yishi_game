@@ -2,99 +2,69 @@
 
 ## 当前任务编号
 
-REQ-0002
+REQ-0004（第二轮复审 R2 修订）
 
 ## 当前版本
 
-公开仓库安全基线（未发布）
+Android M0 基础设施 R2 修订版；待复审代码提交：`a8c57d61566380a0e5fa0153c351db28d39dfa52`。
 
 ## 本次修改摘要
 
-强化敏感文件隔离，建立本地私有数据目录、公开配置样例、全历史安全扫描器和公开仓库协作政策。
+仅修复 `R2-BLOCKER-01` 并完成 `R2-TEST-GATE-01`：加入显式恢复和二阶段安全握手，修复 SurfaceView 窗口识别，并在最终代码上完成自动测试、公开仓库安全扫描和 Pad GUI 回归。未新增 REQ，未实现 OCR、副本、战斗或任何游戏输入。
 
 ## 完整 commit hash
 
-`3fe0b734699111857d3ef74acf97898242a3845a`
+`a8c57d61566380a0e5fa0153c351db28d39dfa52`
 
-该 hash 为安全改造实现提交；本文件、IMPLEMENT 报告和 patch 由后续元数据提交归档。
+该 hash 为待复审代码提交；本交接、IMPLEMENT 更新和 patch 由后续元数据提交归档。
 
 ## git diff --stat
 
 ```text
- .env.example                        |   9 ++
- .gitignore                          |  42 +++++-
- device.env.example                  |   5 +
- docs/WORKFLOW.md                    |  45 ++++++
- docs/requirements/REQ-0002.md       |  29 ++++
- tools/security/check_public_repo.py | 275 ++++++++++++++++++++++++++++++++++++
- 6 files changed, 404 insertions(+), 1 deletion(-)
+7 files changed, 274 insertions(+), 54 deletions(-)
 ```
 
-比较范围：`908a18459983ef9072e863835404c1ad2eae3ce1..3fe0b734699111857d3ef74acf97898242a3845a`。完整差异见 `codex/handoff/LATEST.patch`。
-
-## 修改了哪些安全规则
-
-- Secret、设备、网络、签名、日志、截图和诊断原始数据只允许保存在本地私有目录。
-- 长期凭据优先使用 macOS Keychain；代码通过统一配置层读取，不得硬编码或写入日志。
-- 提交前扫描工作区、暂存区、历史文件和提交信息；命中时阻止提交且不回显值。
-- 完整日志和错误截图默认不入库；公开诊断信息必须脱敏。
-
-## `.gitignore` 增加了什么
-
-- 本地 env、Secret、凭据、SSH/签名材料。
-- `diagnostics/private/`、`logs/private/`、`errors/private/`、`screenshots/private/`。
-- ADB、设备 dump、UIAutomator、logcat、crash dump 和 tombstone。
-- Python 虚拟环境/缓存以及 Android 构建产物。
-
-## 本地敏感目录
-
-`~/.config/yishijieyongzhe/`
-
-根目录及 `private/` 子目录权限已验证为 `700`；已有顶层 env 文件权限检查无不合规项。未读取或输出任何本地 Secret 内容。
+比较范围：`c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8..a8c57d61566380a0e5fa0153c351db28d39dfa52`。这是相对上一轮已复审实现的 R2 专项差异；完整内容见 `codex/handoff/LATEST.patch`。
 
 ## 关键代码改动说明
 
-新增 `tools/security/check_public_repo.py`。该工具不依赖第三方库，检测凭据赋值、常见 Token、私钥头、Bearer、私有 IP、MAC、真实本机用户路径、设备配置以及敏感文件路径。
+- `targetVisible` 负责配置和环境门禁，`targetActive` 只负责第二阶段运行许可。
+- “准备启动”从 READY 进入 `WAIT_TARGET_ACTIVE`；目标窗口激活且采集/窗口门禁仍安全时才进入 `RUNNING_PLACEHOLDER`。
+- 运行失焦进入 PAUSED；游戏重新获得焦点不会自动恢复。用户必须点击“显式恢复并重新握手”，然后再次切回游戏。
+- 窗口变化、窗口不可用、采集失效、辅助服务失效统一要求完整环境复查，不能走普通恢复。
+- Cocos/SurfaceView 根节点没有包名时，通过 accessibility event 的 windowId 补充窗口身份；焦点判断仍使用实时窗口 active/focused 属性。
+- UI 只把辅助服务真实连接视为“已启用”，消除 ZUI 残留配置造成的假阳性。
 
 ## 测试结果
 
-- 扫描器自测：通过。
-- 实现提交后的当前/暂存及完整历史扫描：通过。
-- 合成假凭据阻断和不回显测试：通过。
-- ignore 规则边界测试：通过。
-- Python 编译与 Git whitespace 检查：源文件通过；标准补丁文件已单独验证与原始 `git diff` 逐字一致。
-- Android 构建/ADB 真机测试：不适用，当前无应用工程。
+- Gradle 构建与 JVM 单元测试：通过，`BUILD SUCCESSFUL`。
+- `connectedDebugAndroidTest`：2 项通过，0 失败、0 跳过。
+- Pad Inspector：5 项通过。
+- 安全扫描 self-test 与历史扫描：通过；88 个当前/索引文本候选、123 个历史文本对象，跳过 2 个二进制或超大对象。
+- `git diff --check`：通过。
 
-## 是否发现历史敏感信息
+## 真机测试结果
 
-在扫描器覆盖的规则范围内，未发现真实 Token、密码、私钥、keystore、设备信息、原始日志、敏感截图或未脱敏诊断数据。
-
-Git 历史包含正常的作者邮箱元数据；其值未在本报告中输出。它不是认证凭据，但可能构成用户希望隐藏的个人信息。
-
-## 是否需要立即撤销 Token
-
-否。没有证据表明真实 Token 或其他认证 Secret 曾进入当前 Git 历史。
-
-## Security scan 是否通过
-
-通过。实现提交后结果：28 个当前/暂存文本候选、34 个历史文本对象，0 个二进制或超大对象被跳过。
-
-## Push 是否成功
-
-成功。安全改造实现提交和交接元数据均已推送至 Gitee `origin/master`。
+- Pad 无线 ADB 在线，user 0 只有一个助手包，辅助服务真实绑定。
+- GUI 完整通过：环境检查 → READY → 准备启动 → WAIT_TARGET_ACTIVE → 游戏聚焦 → RUNNING_PLACEHOLDER → 助手聚焦 → PAUSED。
+- PAUSED 后游戏单纯重新聚焦仍保持 PAUSED；显式恢复后重新进入 WAIT_TARGET_ACTIVE，再聚焦游戏才恢复运行占位态。
+- 屏幕采集持续产出非空帧；只共享助手自身。没有点击游戏内容区，也没有 OCR、副本或战斗行为。
+- 连接设备测试完成后已重装同一 APK、恢复辅助服务并重新保存本机配置；敏感的实际包名、设备地址、截图和诊断原文均未入库。
 
 ## 错误信息
 
-初次自测发现示例 IP 和扫描器自测源码的误报，已收紧占位符识别并改为动态生成测试数据。修正后全部检查通过。
+- 首次最终构建因终端未设置 JDK/SDK 路径而未启动；指定已安装的 OpenJDK 17 和 Android SDK 后构建成功。这不是代码失败。
+- Android SDK XML 版本提示未阻塞构建。
+- ZUI 在 APK 被测试任务卸载/重装后会清空或关闭辅助功能设置，已在最终唯一实例上恢复并核验真实绑定。
 
 ## 尚未解决的问题
 
-- 是否隐藏既有 Git 作者邮箱，需要用户在公开仓库前确认；如需处理，应先配置公开安全的 Git 身份，再经确认重写历史并强制推送。
-- 二进制截图仍必须人工复核，文本扫描器不能替代视觉脱敏检查。
+- R2-IMPROVEMENT-01（高分辨率 RGBA 缓冲分配）按 Review 明确不阻塞 REQ-0004，留待进入视觉识别前优化。
+- M0 之外的 OCR、模板识别、副本和战斗功能仍未开始。
 
 ## 希望 ChatGPT 重点审查的内容
 
-- Secret 检测规则与占位符白名单是否平衡误报和漏报。
-- Git 作者邮箱是否允许随公开仓库一起公开。
-- macOS Keychain → 本地 env 的后续配置读取层设计。
-- 二进制截图人工复核流程是否需要增加固定清单或审批记录。
+- `WAIT_TARGET_ACTIVE` 的二阶段门禁是否满足“助手可操作、游戏获焦后才允许运行”的要求。
+- PAUSED 的 `EXPLICIT_CONFIRMATION` 与 `ENVIRONMENT_CHECK` 两类恢复要求是否隔离充分。
+- SurfaceView 窗口 ID 映射是否保持“事件仅标识窗口、实时窗口属性判焦点”的安全边界。
+- 30 秒等待超时及辅助服务真实连接门禁是否足够保守。
