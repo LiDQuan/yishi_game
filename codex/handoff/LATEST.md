@@ -2,69 +2,67 @@
 
 ## 当前任务编号
 
-REQ-0004（第二轮复审 R2 修订）
+REQ-0005
 
 ## 当前版本
 
-Android M0 基础设施 R2 修订版；待复审代码提交：`a8c57d61566380a0e5fa0153c351db28d39dfa52`。
+Android M1 视觉与 Action Guard 基础版；待 ChatGPT Review。
 
 ## 本次修改摘要
 
-仅修复 `R2-BLOCKER-01` 并完成 `R2-TEST-GATE-01`：加入显式恢复和二阶段安全握手，修复 SurfaceView 窗口识别，并在最终代码上完成自动测试、公开仓库安全扫描和 Pad GUI 回归。未新增 REQ，未实现 OCR、副本、战斗或任何游戏输入。
+完成 FrameStore 缓冲复用和轻量 metadata、ViewportMapper、ROI 中文 OCR、TemplateMatcher、版本化页面定义、PageDetector、StablePage、Vision Debug、Action Guard Dry-Run 和私有样本工具。真机识别 3 类用户手动到达的真实页面；未执行任何游戏输入。
 
 ## 完整 commit hash
 
-`a8c57d61566380a0e5fa0153c351db28d39dfa52`
+`560108d020d1429bda72a70c71de09412a6dac64`
 
-该 hash 为待复审代码提交；本交接、IMPLEMENT 更新和 patch 由后续元数据提交归档。
+该 hash 为待复审实现提交；本交接、IMPLEMENT 和 patch 由后续元数据提交归档。
 
 ## git diff --stat
 
 ```text
-7 files changed, 274 insertions(+), 54 deletions(-)
+29 files changed, 1127 insertions(+), 18 deletions(-)
 ```
 
-比较范围：`c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8..a8c57d61566380a0e5fa0153c351db28d39dfa52`。这是相对上一轮已复审实现的 R2 专项差异；完整内容见 `codex/handoff/LATEST.patch`。
+比较范围：`85bc798..560108d020d1429bda72a70c71de09412a6dac64`。完整差异见 `codex/handoff/LATEST.patch`。
 
 ## 关键代码改动说明
 
-- `targetVisible` 负责配置和环境门禁，`targetActive` 只负责第二阶段运行许可。
-- “准备启动”从 READY 进入 `WAIT_TARGET_ACTIVE`；目标窗口激活且采集/窗口门禁仍安全时才进入 `RUNNING_PLACEHOLDER`。
-- 运行失焦进入 PAUSED；游戏重新获得焦点不会自动恢复。用户必须点击“显式恢复并重新握手”，然后再次切回游戏。
-- 窗口变化、窗口不可用、采集失效、辅助服务失效统一要求完整环境复查，不能走普通恢复。
-- Cocos/SurfaceView 根节点没有包名时，通过 accessibility event 的 windowId 补充窗口身份；焦点判断仍使用实时窗口 active/focused 属性。
-- UI 只把辅助服务真实连接视为“已启用”，消除 ZUI 残留配置造成的假阳性。
+- UI 不再观察整屏 RGBA，只观察 FrameMetadata；后台 VisionWorker 限频处理最新帧。
+- 3 类页面每类要求 2 个 OCR 证据，低置信度、近似候选和 OCR 失败不会强制归类。
+- StablePage 用 N/M 窗口抑制瞬时误判，viewport 版本变化立即失效。
+- Action Guard 仅生成 Dry-Run 计划或 DENY，对敏感操作、窗口变化、失焦、采集失效和缺证据采用保守拒绝。
+- Vision Debug 显示 FPS、当前/P95 耗时、OCR/PageDetector 耗时、Detection、StablePage、免费状态和 Guard 结果。
 
 ## 测试结果
 
-- Gradle 构建与 JVM 单元测试：通过，`BUILD SUCCESSFUL`。
-- `connectedDebugAndroidTest`：2 项通过，0 失败、0 跳过。
-- Pad Inspector：5 项通过。
-- 安全扫描 self-test 与历史扫描：通过；88 个当前/索引文本候选、123 个历史文本对象，跳过 2 个二进制或超大对象。
-- `git diff --check`：通过。
+- JVM 单元测试：24 项通过，0 失败。
+- connected Android tests：3 项通过，0 失败；私有真实页面测试再单独运行 1 项并通过。
+- 真实页面：SETTINGS、CHARACTER_SELECT、DUNGEON_LIST 全部匹配。当前无“免费(1/1)”真实样本，正确返回 UNKNOWN。
+- Vision Sampler 1 项、Pad Inspector 5 项全部通过。
+- 公开仓库安全扫描和 `git diff --check` 通过。
 
-## 真机测试结果
+## 性能基线
 
-- Pad 无线 ADB 在线，user 0 只有一个助手包，辅助服务真实绑定。
-- GUI 完整通过：环境检查 → READY → 准备启动 → WAIT_TARGET_ACTIVE → 游戏聚焦 → RUNNING_PLACEHOLDER → 助手聚焦 → PAUSED。
-- PAUSED 后游戏单纯重新聚焦仍保持 PAUSED；显式恢复后重新进入 WAIT_TARGET_ACTIVE，再聚焦游戏才恢复运行占位态。
-- 屏幕采集持续产出非空帧；只共享助手自身。没有点击游戏内容区，也没有 OCR、副本或战斗行为。
-- 连接设备测试完成后已重装同一 APK、恢复辅助服务并重新保存本机配置；敏感的实际包名、设备地址、截图和诊断原文均未入库。
+- Pad：2944×1840。
+- 观察值：Capture 约 3.5 FPS；Vision 约 1.6 FPS；单轮约 22–198 ms。
+- 私有三页 OCR 管线：1.754 秒，平均约 585 ms/页。
+- 5 分钟 PSS：280130 → 320180 KiB，范围 167543–339739 KiB；非单调增长，未见无界泄漏或明显 UI 卡顿。
 
 ## 错误信息
 
-- 首次最终构建因终端未设置 JDK/SDK 路径而未启动；指定已安装的 OpenJDK 17 和 Android SDK 后构建成功。这不是代码失败。
-- Android SDK XML 版本提示未阻塞构建。
-- ZUI 在 APK 被测试任务卸载/重装后会清空或关闭辅助功能设置，已在最终唯一实例上恢复并核验真实绑定。
+- Android SDK XML 工具版本提示不阻塞构建。
+- 连接测试会卸载被测 APK，导致后续单独私有 fixture 测试需重装 APK 并重新放入私有样本；已重跑通过。
 
 ## 尚未解决的问题
 
-- R2-IMPROVEMENT-01（高分辨率 RGBA 缓冲分配）按 Review 明确不阻塞 REQ-0004，留待进入视觉识别前优化。
-- M0 之外的 OCR、模板识别、副本和战斗功能仍未开始。
+- 真实模板集隐私审核仍为 PENDING，未入公开仓库；当前真机三页验证使用 OCR 双证据。
+- 没有显示“免费(1/1)”的真实副本详情样本，因此不做 AVAILABLE 真机声明。
+- 内存基线波动较大，建议 Review 后继续长时间采样。
 
 ## 希望 ChatGPT 重点审查的内容
 
-- `WAIT_TARGET_ACTIVE` 的二阶段门禁是否满足“助手可操作、游戏获焦后才允许运行”的要求。
-- PAUSED 的 `EXPLICIT_CONFIRMATION` 与 `ENVIRONMENT_CHECK` 两类恢复要求是否隔离充分。
-- SurfaceView 窗口 ID 映射是否保持“事件仅标识窗口、实时窗口属性判焦点”的安全边界。
-- 30 秒等待超时及辅助服务真实连接门禁是否足够保守。
+- 双 OCR 证据、候选差值和 StablePage N/M 是否足够保守。
+- 本机私有 viewport/fixture 的保密边界及窗口变化失效策略。
+- Action Guard 全局门禁、敏感证据门禁和永久禁止操作的拒绝顺序。
+- 5 分钟 PSS 波动和整屏 snapshot 拷贝在后续版本是否需要进一步改为 ROI 拷贝。
