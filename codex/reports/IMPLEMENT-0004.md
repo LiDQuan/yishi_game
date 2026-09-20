@@ -102,3 +102,75 @@ REQ-0004
 ## Git commit hash
 
 `c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8`
+
+## 第二轮复审（R2）修订
+
+### 对应 Review 项
+
+- `R2-BLOCKER-01`：修复 GUI 无法完成安全启动握手的问题。
+- `R2-TEST-GATE-01`：在最终代码上完成构建、单元测试、连接设备测试、Pad Inspector 测试、安全扫描和真机 GUI 回归。
+
+### 修改文件
+
+- `app/src/main/java/com/lidquan/yishigame/MainViewModel.kt`
+- `app/src/main/java/com/lidquan/yishigame/accessibility/GameAccessibilityService.kt`
+- `app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt`
+- `app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt`
+- `app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt`
+- `app/src/test/java/com/lidquan/yishigame/EnvironmentUiStateTest.kt`
+- `app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt`
+
+### 新增文件
+
+- 无。未新增 REQ，未开始 OCR、副本或战斗功能。
+
+### 核心实现说明
+
+- 将目标“可见”和“已激活”拆分。助手获得焦点时仍可完成环境检查并点击“准备启动”，随后进入 `WAIT_TARGET_ACTIVE`。
+- 只有目标窗口重新获得 active/focused、采集会话仍为 Active、窗口门禁仍为 MATCHED 时，才进入 `RUNNING_PLACEHOLDER`。
+- 运行中失焦进入 `PAUSED`；目标重新获得焦点不会自动恢复，必须先由用户点击“显式恢复并重新握手”。
+- 窗口变化、窗口不可用、采集失效或辅助服务失效标记为 `ENVIRONMENT_CHECK`，禁止走普通显式恢复。
+- 目标激活等待超过 30 秒时安全暂停。
+- 针对 Cocos/SurfaceView 根节点包名为空的情况，以 Accessibility 窗口事件的 windowId 建立本地窗口包名映射；active/focused 仍取实时窗口属性，不把旧事件当作前台依据。
+- 辅助功能可用性只认服务真实连接状态，不再把系统组件列表中的残留条目误判为已启用。
+
+### 关键技术决策
+
+- 采用“显式恢复 + 二阶段安全握手”，不因目标游戏重新获得焦点自动恢复。
+- 窗口和采集故障必须重新环境检查；只有单纯失焦或等待超时允许用户显式发起重新握手。
+- M0 仍只进入运行占位态，不发送任何游戏点击、手势或返回操作。
+
+### 构建与自动测试结果
+
+- `testDebugUnitTest assembleDebug`：通过，`BUILD SUCCESSFUL`。
+- `connectedDebugAndroidTest`：通过，2 项测试、0 失败、0 跳过。
+- Pad Inspector：5 项通过。
+- 公开仓库安全扫描 self-test 与 `--history`：通过；88 个当前/索引文本候选、123 个历史文本对象，跳过 2 个二进制或超大对象。
+- `git diff --check`：通过。
+- Android SDK XML 版本提示仍存在，但不阻塞构建。
+
+### 真机测试结果
+
+- 无线 ADB 目标 Pad 在线；仅安装 1 个 user 0 助手包。
+- 辅助服务真实绑定，目标游戏窗口在助手获得焦点时显示为“可见”，窗口基线可建立并匹配。
+- 屏幕采集会话持续产出非空帧；测试只共享助手自身，不采集游戏画面。
+- GUI 实测通过：环境检查 → `READY` → 准备启动 → `WAIT_TARGET_ACTIVE` → 游戏获得焦点 → `RUNNING_PLACEHOLDER` → 失焦 → `PAUSED`。
+- `PAUSED` 后仅把游戏切回前台不会自动恢复；点击“显式恢复并重新握手”后再次完成第二阶段才进入运行占位态。
+- 全流程未点击游戏内容区，未执行 OCR、模板匹配、副本或战斗操作。
+- 连接设备测试会卸载被测 APK；测试后已只重装同一 APK，恢复辅助服务，并重新保存、核验本机目标配置。实际包名和设备地址未写入仓库。
+
+### 已知问题与未完成内容
+
+- 该 Pad 的系统应用选择器仍会展示其他用户空间的同名入口；user 0 实际只安装一个助手包。
+- 覆盖安装或连接设备测试后，ZUI 会关闭辅助功能总开关；测试流程需重新确认服务真实绑定。
+- 屏幕采集授权按 Android 机制在应用重装或会话结束后需要重新授予。
+- R2-IMPROVEMENT-01 的高分辨率帧缓冲复用留待进入视觉识别前处理，本轮未扩展范围。
+
+### 后续建议
+
+- 先由 ChatGPT 完成第三轮复审；通过前不要合并 main，也不要开始 OCR、副本或战斗功能。
+- 后续真机回归避免在最终安装之后再运行 `connectedDebugAndroidTest`，因为该任务会卸载测试 APK。
+
+### R2 实现 commit hash
+
+`a8c57d61566380a0e5fa0153c351db28d39dfa52`
