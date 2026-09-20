@@ -568,3 +568,258 @@ IMPROVEMENT-01 建议同轮完成；若不完成，必须在 IMPLEMENT-0004 中�
    - 游戏窗口可见但非 active 时不能误判为可运行
 9. Push GitHub。
 10. 交给 ChatGPT进行第二轮复审。
+
+
+---
+
+# 第二轮复审（R2）
+
+复审日期：2026-09-20  
+复审实现提交：`c3ffb15da44dd8e5df2e6a11ce110cd01358bfb8`  
+交接提交：`7830cb3087944344c0506c9de6ffab624e834536`  
+状态：**CHANGES_REQUIRED**
+
+## R2-1. 第一轮问题复核
+
+以下第一轮项目已确认实质修复：
+
+- **BLOCKER-01：通过。** MediaProjection 已改为持续 Session，`latestFrame` 能提供像素字节、stride 和 timestamp；不再首帧即 stop。
+- **BLOCKER-02：核心识别逻辑通过。** `AccessibilityEvent.packageName` 已降级为 `lastEventPackage` 诊断信息；当前目标状态改用 `rootInActiveWindow + isActive/isFocused`。
+- **BLOCKER-03：窗口门禁通过。** 已有 `NO_BASELINE / MATCHED / CHANGED / UNAVAILABLE`，READY/RUNNING 环境变化会离开可执行态，开始前也重新检查。
+- **BLOCKER-04：通过。** STOPPED 已能拒绝延迟 Fail，显式 Reset 后才重新进入正常流程。
+- **TEST/SECURITY-01：通过。** Pad Inspector raw artifact 已统一强制 `0600`，并增加权限测试。
+- **IMPROVEMENT-01：通过。** DailyExecution 已使用业务键 `INSERT IGNORE + getOrCreate`，并验证 SUCCESS 不会被重复 PENDING 覆盖。
+
+这些改动符合上一轮 Review 的预期。
+
+## R2-BLOCKER-01：助手 GUI 与“目标游戏必须 active”形成启动死锁
+
+### 问题
+
+当前 `MainViewModel.refresh()` 只在目标游戏同时满足以下条件时认定 `targetDetected=true`：
+
+```kotlin
+val activePackage = service?.activeWindowPackage()
+
+val targetWindow = service
+    ?.queryWindows()
+    ?.firstOrNull {
+        configuredPackage.isNotBlank() &&
+            it.packageName == configuredPackage &&
+            (it.isActive || it.isFocused)
+    }
+
+val targetDetected =
+    configuredPackage.isNotBlank() &&
+    activePackage == configuredPackage &&
+    targetWindow != null
+```
+
+而 `EnvironmentUiState.canBeginPlaceholder` 又要求：
+
+```kotlin
+targetDetected &&
+windowGate == WindowGate.MATCHED
+```
+
+`runEnvironmentCheck()` 同样要求 `snapshot.targetDetected`。
+
+这在自由窗口桌面环境中形成了逻辑死锁：
+
+```text
+游戏 active
+→ 用户点击助手窗口
+→ 助手成为 active/focused
+→ 游戏 targetDetected=false
+→ “环境检查/开始自动化”无法通过
+```
+
+Codex 本轮真机报告已经实际观察到：
+
+> 游戏窗口可见但助手为 active 时显示“未识别”且开始按钮禁用。
+
+这说明安全判断本身是有效的，但当前交互设计无法让用户从 GUI 正常启动。
+
+### 影响
+
+如果按当前实现进入下一阶段：
+
+- 用户无法在助手 UI 中正常完成“环境检查 → READY → 开始”。
+- 用户为了让游戏保持 active，只能依赖 ADB、外部触发或竞态点击，这与 APK 独立运行目标冲突。
+- 后续真实自动化即使 Action Guard 完全正确，也缺少一个可用的“安全启动握手”。
+
+这是 M0 基础流程问题，因此本轮仍不能合并 main。
+
+### 修改意见
+
+把“配置/可见”和“真正允许输入”拆成两个概念：
+
+```text
+targetVisible
+targetActive
+```
+
+助手 UI 中的“开始”不应直接进入 RUNNING，而应是 **Arm / 准备启动**。
+
+推荐流程：
+
+```text
+用户在助手点击“开始”
+→ ARMED / WAIT_TARGET_ACTIVE
+→ 助手提示“请切回游戏”
+→ 用户点击游戏窗口
+→ Accessibility 检测：
+    targetActive == true
+    capture session == Active
+    windowGate == MATCHED
+→ 再进入 READY/RUNNING
+```
+
+如果希望体验更自动，也可以在 Arm 后尝试通过 Android 正常启动 Intent 把已配置目标 App 切到前台，但即使自动切换失败，也必须保留 WAIT_TARGET_ACTIVE 安全等待，而不是绕过 active 检查。
+
+### 数据结构建议
+
+```kotlin
+data class EnvironmentSnapshot(
+    val targetVisible: Boolean,
+    val targetActive: Boolean,
+    val targetBounds: WindowBounds?,
+    val windowGate: WindowGate,
+    // ...
+)
+```
+
+查询窗口时先找到“可见的目标窗口”，不要只查 active/focused：
+
+```kotlin
+val visibleTarget = service.queryWindows()
+    .filter { it.packageName == configuredPackage }
+    .maxByOrNull { it.layer }
+
+val targetActive =
+    activePackage == configuredPackage &&
+    visibleTarget != null &&
+    (visibleTarget.isActive || visibleTarget.isFocused)
+```
+
+### 状态机建议
+
+M0 可以增加：
+
+```text
+READY_TO_ARM
+WAIT_TARGET_ACTIVE
+RUNNING_PLACEHOLDER
+```
+
+或者保留现有状态名，但必须表达同等语义。
+
+关键原则：
+
+- 点击助手中的“开始”时不要求游戏此刻仍 active。
+- 真正发送任何游戏输入之前，必须要求游戏重新 active。
+- WAIT_TARGET_ACTIVE 超时后进入 PAUSED / WAIT_USER，不得继续。
+- 一旦运行中失去 targetActive，立即 PAUSE，并阻断 Action。
+
+### 参考伪代码
+
+```kotlin
+fun armAutomation() {
+    val snapshot = environmentProbe.snapshot()
+
+    if (!snapshot.accessibilityReady ||
+        snapshot.captureState !is ScreenCaptureState.Active ||
+        !snapshot.targetVisible ||
+        snapshot.windowGate != WindowGate.MATCHED
+    ) {
+        return
+    }
+
+    stateMachine.dispatch(AutomationEvent.Arm)
+}
+
+fun onEnvironmentChanged(snapshot: EnvironmentSnapshot) {
+    if (stateMachine.state.value == AutomationState.WAIT_TARGET_ACTIVE &&
+        snapshot.targetActive &&
+        snapshot.windowGate == WindowGate.MATCHED
+    ) {
+        stateMachine.dispatch(AutomationEvent.TargetActivated)
+    }
+}
+```
+
+### 建议真机测试
+
+必须在联想电脑模式实际走完整 GUI 流程：
+
+1. 游戏窗口可见。
+2. 点击助手窗口，助手成为 active。
+3. “开始/准备启动”按钮仍可点击。
+4. 点击后进入 WAIT_TARGET_ACTIVE，而不是直接运行。
+5. 点击游戏窗口。
+6. 检测到游戏 active 后自动进入运行占位态。
+7. 再点击助手/其他窗口，运行态立即 PAUSE。
+8. 游戏重新 active 且窗口仍 MATCHED 后才能恢复。
+9. 系统弹窗覆盖游戏时不能进入运行态。
+10. 全流程不依赖 ADB 触发 UI 控件。
+
+## R2-TEST-GATE-01：合并前补一次最终 connectedDebugAndroidTest
+
+### 问题
+
+IMPLEMENT 说明修订代码曾成功执行 2 项 Room 仪器测试，但最后一次完整复跑时无线 ADB 已不可达，因此最终完整测试链没有再次形成一组同时为绿色的结果。
+
+这不是当前代码缺陷，但在修复 R2-BLOCKER-01 后本来就需要重新做真机回归。
+
+### 修改意见
+
+修完 R2-BLOCKER-01 后，ADB 恢复 ready 时一次性执行并记录：
+
+```text
+testDebugUnitTest
+connectedDebugAndroidTest
+Pad Inspector tests
+security scan
+git diff --check
+```
+
+以及上面的完整 GUI Arm → 切回游戏 → Run → 失焦 Pause 流程。
+
+## R2-IMPROVEMENT-01：全屏 RGBA ByteArray 的持续分配需在 M1 前优化
+
+当前每个采样帧都会：
+
+```kotlin
+ByteArray(buffer.remaining())
+```
+
+并放入 StateFlow。
+
+M0 用于验证持续帧链路可以接受，但高分辨率平板长期运行时会产生较大的内存分配和 GC 压力。
+
+本项不阻塞 REQ-0004，但进入 OCR / 模板匹配前建议：
+
+- 降低识别帧率。
+- 使用 ROI。
+- 复用缓冲区/图像池。
+- 不让 UI 因每一帧都完整 refresh。
+- 为视觉层提供按需 snapshot，而不是让整个 Compose 层订阅大帧对象。
+
+## 第二轮结论
+
+```text
+REQ-0004 = CHANGES_REQUIRED
+DO NOT MERGE TO main
+```
+
+当前只剩 **1 个业务阻塞项：GUI 安全启动握手**。
+
+Codex 下一轮继续沿用 `feat/req-0004-android-foundation`，只修本轮 R2-BLOCKER-01 并执行 R2-TEST-GATE-01，不新增 REQ-0005，不开始 OCR、副本或战斗功能。
+
+修完后更新：
+
+- `codex/reports/IMPLEMENT-0004.md`
+- `codex/handoff/LATEST.md`
+- `codex/handoff/LATEST.patch`
+
+然后再次交给 ChatGPT 做第三轮复审。
