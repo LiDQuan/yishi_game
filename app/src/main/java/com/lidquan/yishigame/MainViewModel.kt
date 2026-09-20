@@ -15,7 +15,7 @@ import com.lidquan.yishigame.automation.AutomationEvent
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.AutomationStateMachine
 import com.lidquan.yishigame.automation.WindowBounds
-import com.lidquan.yishigame.automation.WindowChange
+import com.lidquan.yishigame.automation.WindowGate
 import com.lidquan.yishigame.automation.WindowMonitor
 import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureController
@@ -32,14 +32,20 @@ data class EnvironmentUiState(
     val automationState: AutomationState = AutomationState.IDLE,
     val accessibilityEnabled: Boolean = false,
     val captureState: ScreenCaptureState = ScreenCaptureState.NotRequested,
+    val latestFrameBytes: Int = 0,
     val targetPackageInput: String = "",
     val targetDetected: Boolean = false,
     val windowBounds: WindowBounds? = null,
-    val windowChange: WindowChange = WindowChange.UNAVAILABLE,
+    val windowGate: WindowGate = WindowGate.UNAVAILABLE,
     val deviceSummary: String = "",
     val recentEvents: List<DiagnosticEvent> = emptyList(),
 ) {
-    val canBeginPlaceholder: Boolean get() = automationState == AutomationState.READY
+    val canBeginPlaceholder: Boolean get() =
+        automationState == AutomationState.READY &&
+            accessibilityEnabled &&
+            captureState is ScreenCaptureState.Active &&
+            targetDetected &&
+            windowGate == WindowGate.MATCHED
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -54,8 +60,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch { stateMachine.state.collect { refresh() } }
         viewModelScope.launch { captureController.state.collect { refresh() } }
+        viewModelScope.launch { captureController.latestFrame.collect { refresh() } }
         viewModelScope.launch { GameAccessibilityService.connected.collect { refresh() } }
-        viewModelScope.launch { GameAccessibilityService.foregroundPackage.collect { refresh() } }
+        viewModelScope.launch { GameAccessibilityService.lastEventPackage.collect { refresh() } }
         viewModelScope.launch { DiagnosticRecorder.events.collect { refresh() } }
         refresh()
     }
@@ -87,12 +94,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!stateMachine.dispatch(AutomationEvent.StartPrecheck)) return
         refresh()
         val snapshot = mutableUiState.value
-        if (!snapshot.accessibilityEnabled || snapshot.captureState !is ScreenCaptureState.Captured) {
+        if (!snapshot.accessibilityEnabled || snapshot.captureState !is ScreenCaptureState.Active) {
             stateMachine.dispatch(AutomationEvent.PermissionMissing)
             record("PRECHECK", "PERMISSION_REQUIRED")
             return
         }
-        if (!snapshot.targetDetected || snapshot.windowBounds == null) {
+        if (!snapshot.targetDetected || snapshot.windowBounds == null || windowMonitor.accept(snapshot.windowBounds) != WindowGate.MATCHED) {
             stateMachine.dispatch(AutomationEvent.Fail("ENV_TARGET_WINDOW_NOT_READY"))
             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
             return
@@ -104,6 +111,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun beginPlaceholder() {
+        refresh()
+        if (!mutableUiState.value.canBeginPlaceholder) {
+            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
+            record("AUTOMATION_PLACEHOLDER", "BLOCKED", "ENVIRONMENT_CHANGED")
+            return
+        }
         if (stateMachine.dispatch(AutomationEvent.BeginPlaceholder)) {
             record("AUTOMATION_PLACEHOLDER", "STARTED")
         }
@@ -111,30 +124,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stop() {
         stateMachine.dispatch(AutomationEvent.Stop)
+        captureController.stop()
         record("STOP", "STOPPED")
     }
 
     private fun refresh() {
         val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
-        val foreground = GameAccessibilityService.foregroundPackage.value
-        val targetBounds = GameAccessibilityService.instance
+        val service = GameAccessibilityService.instance
+        val activePackage = service?.activeWindowPackage()
+        val targetWindow = service
             ?.queryWindows()
-            ?.firstOrNull { configuredPackage.isNotBlank() && it.packageName == configuredPackage }
-            ?.bounds
-        val change = windowMonitor.observe(targetBounds)
-        if (change == WindowChange.CHANGED && stateMachine.state.value == AutomationState.RUNNING_PLACEHOLDER) {
-            stateMachine.dispatch(AutomationEvent.Fail("WINDOW_BOUNDS_CHANGED"))
-            record("WINDOW_MONITOR", "BLOCKED", "WINDOW_BOUNDS_CHANGED")
+            ?.firstOrNull {
+                configuredPackage.isNotBlank() &&
+                    it.packageName == configuredPackage &&
+                    (it.isActive || it.isFocused)
+            }
+        val targetDetected = configuredPackage.isNotBlank() && activePackage == configuredPackage && targetWindow != null
+        val gate = windowMonitor.observe(targetWindow?.bounds)
+        if (gate in setOf(WindowGate.CHANGED, WindowGate.UNAVAILABLE) && stateMachine.state.value in setOf(AutomationState.READY, AutomationState.RUNNING_PLACEHOLDER)) {
+            stateMachine.dispatch(AutomationEvent.EnvironmentChanged)
+            record("WINDOW_MONITOR", "BLOCKED", "WINDOW_${gate.name}")
         }
         val priorInput = mutableUiState.value.targetPackageInput
         mutableUiState.value = EnvironmentUiState(
             automationState = stateMachine.state.value,
             accessibilityEnabled = isAccessibilityEnabled(),
             captureState = captureController.state.value,
+            latestFrameBytes = captureController.latestFrame.value?.rgba?.size ?: 0,
             targetPackageInput = priorInput.ifBlank { configuredPackage },
-            targetDetected = configuredPackage.isNotBlank() && foreground == configuredPackage,
-            windowBounds = targetBounds,
-            windowChange = change,
+            targetDetected = targetDetected,
+            windowBounds = targetWindow?.bounds,
+            windowGate = gate,
             deviceSummary = deviceSummary(),
             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
         )

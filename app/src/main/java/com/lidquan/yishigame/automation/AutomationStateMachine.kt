@@ -16,11 +16,19 @@ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDL
         return true
     }
 
-    internal fun transition(current: AutomationState, event: AutomationEvent): AutomationState? = when (event) {
+    internal fun transition(current: AutomationState, event: AutomationEvent): AutomationState? {
+        if (current == AutomationState.STOPPED) {
+            return when (event) {
+                AutomationEvent.Stop -> AutomationState.STOPPED
+                AutomationEvent.Reset, AutomationEvent.StartPrecheck -> AutomationState.IDLE
+                else -> null
+            }
+        }
+        return when (event) {
         AutomationEvent.Stop -> AutomationState.STOPPED
         is AutomationEvent.Fail -> AutomationState.ERROR
         AutomationEvent.Reset -> if (current in setOf(AutomationState.STOPPED, AutomationState.ERROR)) AutomationState.IDLE else null
-        AutomationEvent.StartPrecheck -> if (current in setOf(AutomationState.IDLE, AutomationState.STOPPED)) AutomationState.PRECHECK else null
+        AutomationEvent.StartPrecheck -> if (current in setOf(AutomationState.IDLE, AutomationState.ERROR, AutomationState.WINDOW_CHECK, AutomationState.READY, AutomationState.PAUSED)) AutomationState.PRECHECK else null
         AutomationEvent.PermissionMissing -> if (current == AutomationState.PRECHECK) AutomationState.PERMISSION_REQUIRED else null
         AutomationEvent.DeviceReady -> if (current in setOf(AutomationState.PRECHECK, AutomationState.PERMISSION_REQUIRED)) AutomationState.DEVICE_READY else null
         AutomationEvent.CheckWindow -> if (current == AutomationState.DEVICE_READY) AutomationState.WINDOW_CHECK else null
@@ -28,5 +36,11 @@ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDL
         AutomationEvent.BeginPlaceholder -> if (current == AutomationState.READY) AutomationState.RUNNING_PLACEHOLDER else null
         AutomationEvent.Pause -> if (current == AutomationState.RUNNING_PLACEHOLDER) AutomationState.PAUSED else null
         AutomationEvent.Resume -> if (current == AutomationState.PAUSED) AutomationState.READY else null
+        AutomationEvent.EnvironmentChanged -> when (current) {
+            AutomationState.READY -> AutomationState.WINDOW_CHECK
+            AutomationState.RUNNING_PLACEHOLDER -> AutomationState.PAUSED
+            else -> null
+        }
+        }
     }
 }

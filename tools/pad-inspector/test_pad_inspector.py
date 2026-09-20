@@ -1,4 +1,6 @@
 import importlib.util
+import stat
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,6 +38,21 @@ class PadInspectorTest(unittest.TestCase):
     def test_falls_back_to_confirmed_activity_task_bounds(self):
         dump = "Intent { cmp=example.confirmed.game/example.Activity bnds=[20,40][1620,940] }"
         self.assertEqual((20, 40, 1620, 940), INSPECTOR.parse_activity_bounds(dump, "example.confirmed.game"))
+
+    def test_private_artifact_writers_enforce_owner_only_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, writer, value in (
+                ("window.txt", INSPECTOR.write_private_text, "raw window"),
+                ("activity.txt", INSPECTOR.write_private_text, "raw activity"),
+                ("display.txt", INSPECTOR.write_private_text, "raw display"),
+                ("window.xml", INSPECTOR.write_private_text, "raw ui"),
+                ("report.json", INSPECTOR.write_private_text, "{}"),
+                ("screen.png", INSPECTOR.write_private_bytes, b"raw image"),
+            ):
+                path = root / name
+                writer(path, value)
+                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
 
 
 if __name__ == "__main__":

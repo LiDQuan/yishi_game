@@ -17,7 +17,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.packageName?.toString()?.let { mutableForegroundPackage.value = it }
+        event?.packageName?.toString()?.let { mutableLastEventPackage.value = it }
     }
 
     override fun onInterrupt() = Unit
@@ -55,8 +55,17 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
         val rect = Rect()
         window.getBoundsInScreen(rect)
         val packageName = window.root?.packageName?.toString()
-        if (rect.isEmpty) null else AccessibleWindow(packageName, WindowBounds(rect.left, rect.top, rect.right, rect.bottom))
+        if (rect.isEmpty) null else AccessibleWindow(
+            packageName = packageName,
+            bounds = WindowBounds(rect.left, rect.top, rect.right, rect.bottom),
+            isActive = window.isActive,
+            isFocused = window.isFocused,
+            type = window.type,
+            layer = window.layer,
+        )
     }
+
+    override fun activeWindowPackage(): String? = rootInActiveWindow?.packageName?.toString()
 
     companion object {
         @Volatile
@@ -66,7 +75,7 @@ class GameAccessibilityService : AccessibilityService(), AccessibilityController
         private val mutableConnected = MutableStateFlow(false)
         val connected: StateFlow<Boolean> = mutableConnected.asStateFlow()
 
-        private val mutableForegroundPackage = MutableStateFlow<String?>(null)
-        val foregroundPackage: StateFlow<String?> = mutableForegroundPackage.asStateFlow()
+        private val mutableLastEventPackage = MutableStateFlow<String?>(null)
+        val lastEventPackage: StateFlow<String?> = mutableLastEventPackage.asStateFlow()
     }
 }

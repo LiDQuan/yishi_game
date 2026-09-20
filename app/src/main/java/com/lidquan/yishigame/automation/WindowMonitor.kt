@@ -6,23 +6,24 @@ data class WindowBounds(val left: Int, val top: Int, val right: Int, val bottom:
     val isValid: Boolean get() = width > 0 && height > 0
 }
 
-enum class WindowChange { FIRST_SAMPLE, UNCHANGED, CHANGED, UNAVAILABLE }
+enum class WindowGate { NO_BASELINE, MATCHED, CHANGED, UNAVAILABLE }
 
 class WindowMonitor {
-    private var lastBounds: WindowBounds? = null
+    private var acceptedBounds: WindowBounds? = null
 
-    fun observe(bounds: WindowBounds?): WindowChange {
-        if (bounds?.isValid != true) return WindowChange.UNAVAILABLE
-        val previous = lastBounds
-        lastBounds = bounds
-        return when {
-            previous == null -> WindowChange.FIRST_SAMPLE
-            previous == bounds -> WindowChange.UNCHANGED
-            else -> WindowChange.CHANGED
-        }
+    fun observe(bounds: WindowBounds?): WindowGate {
+        if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
+        val baseline = acceptedBounds ?: return WindowGate.NO_BASELINE
+        return if (bounds == baseline) WindowGate.MATCHED else WindowGate.CHANGED
+    }
+
+    fun accept(bounds: WindowBounds?): WindowGate {
+        if (bounds?.isValid != true) return WindowGate.UNAVAILABLE
+        acceptedBounds = bounds
+        return WindowGate.MATCHED
     }
 
     fun clear() {
-        lastBounds = null
+        acceptedBounds = null
     }
 }

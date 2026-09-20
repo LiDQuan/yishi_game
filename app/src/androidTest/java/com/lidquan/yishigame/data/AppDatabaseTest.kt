@@ -34,7 +34,7 @@ class AppDatabaseTest {
         database.dungeonDao().upsert(
             DungeonEntity("dungeon-1", "测试副本", version = "fixture", riskLevel = "LOW", createdAt = now, updatedAt = now),
         )
-        database.dailyExecutionDao().upsert(
+        database.dailyExecutionDao().getOrCreateDailyExecution(
             DailyExecutionEntity("execution-1", "2026-09-18", "role-1", "DUNGEON", "dungeon-1", "PENDING"),
         )
         database.errorEventDao().upsert(
@@ -47,5 +47,15 @@ class AppDatabaseTest {
         assertNotNull(database.dailyExecutionDao().findDaily("2026-09-18", "role-1", "DUNGEON", "dungeon-1"))
         assertEquals(1, database.errorEventDao().observeRecent().first().size)
         assertEquals(1, database.appSettingsDao().get()?.id)
+    }
+
+    @Test
+    fun reusesExistingDailyExecutionForTheSameBusinessKey() = runBlocking {
+        val first = DailyExecutionEntity("execution-1", "2026-09-18", "role-1", "DUNGEON", "dungeon-1", "SUCCESS")
+        val duplicate = first.copy(id = "execution-2", status = "PENDING")
+
+        assertEquals(first, database.dailyExecutionDao().getOrCreateDailyExecution(first))
+        assertEquals(first, database.dailyExecutionDao().getOrCreateDailyExecution(duplicate))
+        assertEquals("SUCCESS", database.dailyExecutionDao().findDaily("2026-09-18", "role-1", "DUNGEON", "dungeon-1")?.status)
     }
 }

@@ -3,6 +3,7 @@ package com.lidquan.yishigame.capture
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
@@ -29,7 +30,9 @@ class MediaProjectionCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
-    private var finished = false
+    private var closed = false
+    private var frameCount = 0L
+    private var lastFrameTimestampNanos = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,6 +69,10 @@ class MediaProjectionCaptureService : Service() {
             return START_NOT_STICKY
         }
 
+        if (projection != null) return START_NOT_STICKY
+        closed = false
+        frameCount = 0
+        mutableLatestFrame.value = null
         mutableState.value = ScreenCaptureState.Capturing
         startCapture(resultCode, resultData)
         return START_NOT_STICKY
@@ -79,7 +86,7 @@ class MediaProjectionCaptureService : Service() {
         val height = bounds?.height()?.takeIf { it > 0 } ?: metrics.heightPixels
         val density = metrics.densityDpi
 
-        handlerThread = HandlerThread("screen-capture-once").also { it.start() }
+        handlerThread = HandlerThread("screen-capture").also { it.start() }
         handler = Handler(handlerThread!!.looper)
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
 
@@ -87,15 +94,30 @@ class MediaProjectionCaptureService : Service() {
         projection = manager.getMediaProjection(resultCode, resultData).also { mediaProjection ->
             mediaProjection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
-                    if (!finished) fail("CAPTURE_PROJECTION_STOPPED")
+                    closeSession(ScreenCaptureState.Stopped("PROJECTION_STOPPED"))
                 }
             }, handler)
         }
 
         imageReader!!.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            image.close()
-            complete(width, height)
+            try {
+                if (closed || image.timestamp - lastFrameTimestampNanos < minimumFrameIntervalNanos) return@setOnImageAvailableListener
+                val plane = image.planes.first()
+                lastFrameTimestampNanos = image.timestamp
+                frameCount += 1
+                mutableLatestFrame.value = copyScreenFrame(
+                    width = image.width,
+                    height = image.height,
+                    rowStride = plane.rowStride,
+                    pixelStride = plane.pixelStride,
+                    timestampNanos = image.timestamp,
+                    buffer = plane.buffer,
+                )
+                mutableState.value = ScreenCaptureState.Active(width, height, frameCount)
+            } finally {
+                image.close()
+            }
         }, handler)
 
         virtualDisplay = projection!!.createVirtualDisplay(
@@ -108,26 +130,26 @@ class MediaProjectionCaptureService : Service() {
             null,
             handler,
         )
-        handler?.postDelayed({ if (!finished) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
-    }
-
-    @Synchronized
-    private fun complete(width: Int, height: Int) {
-        if (finished) return
-        finished = true
-        mutableState.value = ScreenCaptureState.Captured(width, height)
-        releaseAndStop()
+        handler?.postDelayed({ if (mutableLatestFrame.value == null) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
     }
 
     @Synchronized
     private fun fail(code: String) {
-        if (finished) return
-        finished = true
-        mutableState.value = ScreenCaptureState.Failed(code)
-        releaseAndStop()
+        closeSession(ScreenCaptureState.Failed(code))
     }
 
-    private fun releaseAndStop() {
+    @Synchronized
+    private fun closeSession(finalState: ScreenCaptureState) {
+        if (closed) return
+        closed = true
+        mutableState.value = finalState
+        mutableLatestFrame.value = null
+        releaseResources()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun releaseResources() {
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         imageReader?.close()
@@ -138,19 +160,17 @@ class MediaProjectionCaptureService : Service() {
         handlerThread?.quitSafely()
         handlerThread = null
         handler = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     override fun onDestroy() {
-        if (!finished) {
-            finished = true
-            mutableState.value = ScreenCaptureState.Failed("CAPTURE_SERVICE_DESTROYED")
+        if (!closed) {
+            closed = true
+            if (mutableState.value !is ScreenCaptureState.Stopped) {
+                mutableState.value = ScreenCaptureState.Stopped("SERVICE_DESTROYED")
+            }
+            mutableLatestFrame.value = null
+            releaseResources()
         }
-        virtualDisplay?.release()
-        imageReader?.close()
-        projection?.stop()
-        handlerThread?.quitSafely()
         super.onDestroy()
     }
 
@@ -170,12 +190,22 @@ class MediaProjectionCaptureService : Service() {
         private const val notificationChannelId = "screen_capture"
         private const val notificationId = 1001
         private const val captureTimeoutMs = 10_000L
+        private const val minimumFrameIntervalNanos = 200_000_000L
 
         private val mutableState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.NotRequested)
         val state: StateFlow<ScreenCaptureState> = mutableState.asStateFlow()
+        private val mutableLatestFrame = MutableStateFlow<ScreenFrame?>(null)
+        val latestFrame: StateFlow<ScreenFrame?> = mutableLatestFrame.asStateFlow()
 
         fun markDenied() {
+            mutableLatestFrame.value = null
             mutableState.value = ScreenCaptureState.PermissionDenied
+        }
+
+        fun stop(context: Context) {
+            mutableLatestFrame.value = null
+            mutableState.value = ScreenCaptureState.Stopped("USER_STOPPED")
+            context.stopService(Intent(context, MediaProjectionCaptureService::class.java))
         }
     }
 }

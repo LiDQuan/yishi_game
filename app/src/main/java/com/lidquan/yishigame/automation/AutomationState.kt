@@ -22,6 +22,7 @@ sealed interface AutomationEvent {
     data object BeginPlaceholder : AutomationEvent
     data object Pause : AutomationEvent
     data object Resume : AutomationEvent
+    data object EnvironmentChanged : AutomationEvent
     data object Stop : AutomationEvent
     data object Reset : AutomationEvent
     data class Fail(val errorCode: String) : AutomationEvent

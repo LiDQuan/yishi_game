@@ -37,11 +37,21 @@ class AutomationStateMachineTest {
     }
 
     @Test
-    fun `failure enters error from every state`() {
-        AutomationState.entries.forEach { state ->
+    fun `failure enters error except after an explicit stop`() {
+        AutomationState.entries.filter { it != AutomationState.STOPPED }.forEach { state ->
             val machine = AutomationStateMachine(state)
             assertTrue(machine.dispatch(AutomationEvent.Fail("test")))
             assertEquals(AutomationState.ERROR, machine.state.value)
         }
+    }
+
+    @Test
+    fun `stopped ignores delayed failures and resets safely`() {
+        val machine = AutomationStateMachine(AutomationState.STOPPED)
+
+        assertFalse(machine.dispatch(AutomationEvent.Fail("late_callback")))
+        assertEquals(AutomationState.STOPPED, machine.state.value)
+        assertTrue(machine.dispatch(AutomationEvent.Reset))
+        assertEquals(AutomationState.IDLE, machine.state.value)
     }
 }

@@ -86,6 +86,16 @@ def _prop(name: str) -> str:
     return str(_run("shell", "getprop", name)).strip()
 
 
+def write_private_text(path: Path, value: str) -> None:
+    path.write_text(value, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def write_private_bytes(path: Path, value: bytes) -> None:
+    path.write_bytes(value)
+    path.chmod(0o600)
+
+
 def _parse_wm(text: str) -> dict[str, str | None]:
     values: dict[str, str | None] = {"physical_size": None, "override_size": None, "density": None}
     for line in text.splitlines():
@@ -118,15 +128,15 @@ def capture(label: str, target_package: str | None) -> Path:
     inspected_package = target_package or foreground
     bounds = parse_window_bounds(window_dump, inspected_package) or parse_activity_bounds(activity_dump, inspected_package)
 
-    (report_dir / "window.txt").write_text(window_dump, encoding="utf-8")
-    (report_dir / "activity.txt").write_text(activity_dump, encoding="utf-8")
-    (report_dir / "display.txt").write_text(display_dump, encoding="utf-8")
-    (report_dir / "screen.png").write_bytes(bytes(_run("exec-out", "screencap", "-p", binary=True)))
+    write_private_text(report_dir / "window.txt", window_dump)
+    write_private_text(report_dir / "activity.txt", activity_dump)
+    write_private_text(report_dir / "display.txt", display_dump)
+    write_private_bytes(report_dir / "screen.png", bytes(_run("exec-out", "screencap", "-p", binary=True)))
 
     _run("shell", "uiautomator", "dump", "/sdcard/yishi-window.xml")
     ui_xml = str(_run("shell", "cat", "/sdcard/yishi-window.xml"))
     _run("shell", "rm", "/sdcard/yishi-window.xml")
-    (report_dir / "window.xml").write_text(ui_xml, encoding="utf-8")
+    write_private_text(report_dir / "window.xml", ui_xml)
 
     wm = _parse_wm(wm_dump)
     rotation_match = re.search(r"(?:mCurrentOrientation|orientation|mRotation)\s*[=:]\s*(\d+)", display_dump)
@@ -150,7 +160,7 @@ def capture(label: str, target_package: str | None) -> Path:
         },
         "artifacts": ["window.txt", "activity.txt", "display.txt", "window.xml", "screen.png"],
     }
-    (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_private_text(report_dir / "report.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(f"Private report created: {report_dir}")
     return report_dir
 

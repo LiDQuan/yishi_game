@@ -103,8 +103,9 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
             StatusRow("当前状态", state.automationState.name)
             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
             StatusRow("屏幕采集", captureLabel(state.captureState))
+            StatusRow("最新帧", state.latestFrameBytes.takeIf { it > 0 }?.let { "$it 字节" } ?: "无")
             StatusRow("目标游戏", if (state.targetDetected) "前台已识别" else "未识别")
-            StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowChange}" } ?: "不可用")
+            StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowGate}" } ?: state.windowGate.name)
             StatusRow("设备摘要", state.deviceSummary)
         }
     }
@@ -131,7 +132,11 @@ private fun Controls(
             )
             OutlinedButton(onClick = viewModel::saveTargetPackage, modifier = Modifier.fillMaxWidth()) { Text("保存本机配置") }
             OutlinedButton(onClick = onOpenAccessibilitySettings, modifier = Modifier.fillMaxWidth()) { Text("打开辅助功能设置") }
-            OutlinedButton(onClick = onRequestCapture, modifier = Modifier.fillMaxWidth()) { Text("请求并验证屏幕采集") }
+            OutlinedButton(
+                onClick = onRequestCapture,
+                enabled = state.captureState !is ScreenCaptureState.Active,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("请求并验证屏幕采集") }
             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
             Button(
                 onClick = viewModel::beginPlaceholder,
@@ -156,6 +161,7 @@ private fun captureLabel(state: ScreenCaptureState): String = when (state) {
     ScreenCaptureState.NotRequested -> "未请求"
     ScreenCaptureState.PermissionDenied -> "用户拒绝"
     ScreenCaptureState.Capturing -> "采集中"
-    is ScreenCaptureState.Captured -> "已采集 ${state.width} × ${state.height}"
+    is ScreenCaptureState.Active -> "会话中 ${state.width} × ${state.height} · ${state.frameCount} 帧"
+    is ScreenCaptureState.Stopped -> "已停止：${state.reason}"
     is ScreenCaptureState.Failed -> "失败：${state.code}"
 }

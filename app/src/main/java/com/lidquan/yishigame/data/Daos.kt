@@ -1,7 +1,10 @@
 package com.lidquan.yishigame.data
 
 import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -23,11 +26,18 @@ interface DungeonDao {
 
 @Dao
 interface DailyExecutionDao {
-    @Upsert suspend fun upsert(execution: DailyExecutionEntity)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(execution: DailyExecutionEntity): Long
     @Query("SELECT * FROM daily_executions WHERE gameDayKey = :gameDayKey ORDER BY startedAt")
     fun observeForDay(gameDayKey: String): Flow<List<DailyExecutionEntity>>
     @Query("SELECT * FROM daily_executions WHERE gameDayKey = :gameDayKey AND roleId = :roleId AND actionType = :actionType AND targetId = :targetId LIMIT 1")
     suspend fun findDaily(gameDayKey: String, roleId: String, actionType: String, targetId: String): DailyExecutionEntity?
+
+    @Transaction
+    suspend fun getOrCreateDailyExecution(execution: DailyExecutionEntity): DailyExecutionEntity {
+        if (insertIfAbsent(execution) != -1L) return execution
+        return requireNotNull(findDaily(execution.gameDayKey, execution.roleId, execution.actionType, execution.targetId))
+    }
 }
 
 @Dao
