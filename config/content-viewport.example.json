@@ -1,0 +1,6 @@
+{
+  "profileVersion": 1,
+  "windowBounds": { "left": 0, "top": 0, "right": 1200, "bottom": 1800 },
+  "contentViewport": { "left": 8, "top": 40, "right": 1192, "bottom": 1792 },
+  "verification": "Replace example values only after local visual verification; never guess insets."
+}

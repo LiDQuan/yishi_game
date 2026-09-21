@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "templateSetVersion": 1,
+  "templates": [
+    {
+      "id": "page.example.anchor",
+      "version": 1,
+      "pageId": "EXAMPLE",
+      "roi": {"left": 0.7, "top": 0.8, "right": 0.95, "bottom": 0.95},
+      "threshold": 0.9,
+      "scalePolicy": "FIXED",
+      "asset": "private://page.example.anchor.png"
+    }
+  ]
+}

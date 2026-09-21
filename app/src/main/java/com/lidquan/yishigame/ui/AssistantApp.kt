@@ -33,6 +33,8 @@ import com.lidquan.yishigame.MainViewModel
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.RecoveryRequirement
 import com.lidquan.yishigame.capture.ScreenCaptureState
+import com.lidquan.yishigame.vision.PageDetection
+import com.lidquan.yishigame.action.GuardDecision
 
 @Composable
 fun AssistantApp(
@@ -42,6 +44,7 @@ fun AssistantApp(
 ) {
     val state by viewModel.uiState.collectAsState()
     var showDiagnostics by remember { mutableStateOf(false) }
+    var showVision by remember { mutableStateOf(false) }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -56,6 +59,7 @@ fun AssistantApp(
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             onRequestCapture = onRequestCapture,
                             onShowDiagnostics = { showDiagnostics = true },
+                            onShowVision = { showVision = true },
                         )
                     }
                 } else {
@@ -71,6 +75,7 @@ fun AssistantApp(
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             onRequestCapture = onRequestCapture,
                             onShowDiagnostics = { showDiagnostics = true },
+                            onShowVision = { showVision = true },
                         )
                     }
                 }
@@ -94,6 +99,31 @@ fun AssistantApp(
             },
         )
     }
+    if (showVision) {
+        AlertDialog(
+            onDismissRequest = { showVision = false },
+            confirmButton = { TextButton(onClick = { showVision = false }) { Text("关闭") } },
+            title = { Text("Vision Debug（只读）") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusRow("Viewport", state.windowBounds?.let { "${it.left},${it.top} · ${it.width}×${it.height}" } ?: "未确认")
+                    StatusRow("WindowGate", state.windowGate.name)
+                    StatusRow("Frame", "#${state.frameMetadata.frameId} · %.1f capture FPS".format(state.frameMetadata.captureFps))
+                    StatusRow("Vision", "%.1f FPS · ${state.visionMetrics.lastVisionDurationMs} ms".format(state.visionMetrics.visionFps))
+                    StatusRow("P95", "${state.visionMetrics.p95VisionDurationMs} ms")
+                    StatusRow("OCR / Page", "${state.visionMetrics.ocrDurationMs} / ${state.visionMetrics.pageDetectorDurationMs} ms")
+                    StatusRow("Detection", detectionLabel(state.visionMetrics.pageDetection))
+                    StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
+                    StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
+                    StatusRow("Action Guard", guardLabel(state.dryRunDecision))
+                    Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
+                        Text("评估 DUNGEON_LIST 动作目标 Dry-Run")
+                    }
+                    Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -101,11 +131,11 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("异世界勇者自动化助手", style = MaterialTheme.typography.headlineMedium)
-            Text("M0 基础设施验证版，不执行游戏自动点击。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("M1 视觉基础设施验证版，只识别与 Dry-Run，不执行游戏输入。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             StatusRow("当前状态", state.automationState.name)
             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
             StatusRow("屏幕采集", captureLabel(state.captureState))
-            StatusRow("最新帧", state.latestFrameBytes.takeIf { it > 0 }?.let { "$it 字节" } ?: "无")
+            StatusRow("Frame", state.frameMetadata.frameId.takeIf { it > 0 }?.let { "#$it · %.1f FPS".format(state.frameMetadata.captureFps) } ?: "无")
             StatusRow(
                 "目标游戏",
                 when {
@@ -128,6 +158,7 @@ private fun Controls(
     onOpenAccessibilitySettings: () -> Unit,
     onRequestCapture: () -> Unit,
     onShowDiagnostics: () -> Unit,
+    onShowVision: () -> Unit,
 ) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -169,8 +200,23 @@ private fun Controls(
             }
             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
+            TextButton(onClick = onShowVision, modifier = Modifier.fillMaxWidth()) { Text("Vision Debug（只读）") }
         }
     }
+}
+
+private fun detectionLabel(detection: PageDetection): String = when (detection) {
+    is PageDetection.Matched -> "MATCHED ${detection.pageId} · %.3f".format(detection.confidence)
+    is PageDetection.Ambiguous -> "AMBIGUOUS · ${detection.candidates.joinToString { it.pageId }}"
+    is PageDetection.Unknown -> "UNKNOWN"
+}
+
+private fun guardLabel(decision: GuardDecision?): String = when (decision) {
+    null -> "未评估"
+    is GuardDecision.AllowDryRun -> decision.plan.let {
+        "ALLOW_DRY_RUN（不会执行）· rect=${it.targetRect.left},${it.targetRect.top},${it.targetRect.right},${it.targetRect.bottom} · point=${it.tapPoint.x},${it.tapPoint.y}"
+    }
+    is GuardDecision.Deny -> "DENY · ${decision.reason}"
 }
 
 @Composable

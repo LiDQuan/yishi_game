@@ -72,7 +72,7 @@ class MediaProjectionCaptureService : Service() {
         if (projection != null) return START_NOT_STICKY
         closed = false
         frameCount = 0
-        mutableLatestFrame.value = null
+        frameStore.clear()
         mutableState.value = ScreenCaptureState.Capturing
         startCapture(resultCode, resultData)
         return START_NOT_STICKY
@@ -106,13 +106,13 @@ class MediaProjectionCaptureService : Service() {
                 val plane = image.planes.first()
                 lastFrameTimestampNanos = image.timestamp
                 frameCount += 1
-                mutableLatestFrame.value = copyScreenFrame(
+                frameStore.publish(
                     width = image.width,
                     height = image.height,
                     rowStride = plane.rowStride,
                     pixelStride = plane.pixelStride,
                     timestampNanos = image.timestamp,
-                    buffer = plane.buffer,
+                    source = plane.buffer,
                 )
                 mutableState.value = ScreenCaptureState.Active(width, height, frameCount)
             } finally {
@@ -130,7 +130,7 @@ class MediaProjectionCaptureService : Service() {
             null,
             handler,
         )
-        handler?.postDelayed({ if (mutableLatestFrame.value == null) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
+        handler?.postDelayed({ if (frameStore.metadata.value.frameId == 0L) fail("CAPTURE_TIMEOUT") }, captureTimeoutMs)
     }
 
     @Synchronized
@@ -143,7 +143,7 @@ class MediaProjectionCaptureService : Service() {
         if (closed) return
         closed = true
         mutableState.value = finalState
-        mutableLatestFrame.value = null
+        frameStore.clear()
         releaseResources()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -168,7 +168,7 @@ class MediaProjectionCaptureService : Service() {
             if (mutableState.value !is ScreenCaptureState.Stopped) {
                 mutableState.value = ScreenCaptureState.Stopped("SERVICE_DESTROYED")
             }
-            mutableLatestFrame.value = null
+            frameStore.clear()
             releaseResources()
         }
         super.onDestroy()
@@ -194,16 +194,15 @@ class MediaProjectionCaptureService : Service() {
 
         private val mutableState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.NotRequested)
         val state: StateFlow<ScreenCaptureState> = mutableState.asStateFlow()
-        private val mutableLatestFrame = MutableStateFlow<ScreenFrame?>(null)
-        val latestFrame: StateFlow<ScreenFrame?> = mutableLatestFrame.asStateFlow()
+        val frameStore = LatestFrameStore()
 
         fun markDenied() {
-            mutableLatestFrame.value = null
+            frameStore.clear()
             mutableState.value = ScreenCaptureState.PermissionDenied
         }
 
         fun stop(context: Context) {
-            mutableLatestFrame.value = null
+            frameStore.clear()
             mutableState.value = ScreenCaptureState.Stopped("USER_STOPPED")
             context.stopService(Intent(context, MediaProjectionCaptureService::class.java))
         }

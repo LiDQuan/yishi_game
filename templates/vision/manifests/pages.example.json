@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "pageDefinitionVersion": 1,
+  "pages": [
+    {
+      "pageId": "EXAMPLE",
+      "version": 1,
+      "required": [{"type": "template", "id": "page.example.anchor", "minimumConfidence": 0.9}],
+      "optional": [],
+      "negative": [{"type": "template", "id": "purchase.dialog", "minimumConfidence": 0.95}],
+      "threshold": 0.9,
+      "minimumMargin": 0.05
+    }
+  ]
+}
