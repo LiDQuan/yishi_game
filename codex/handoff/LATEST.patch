@@ -1,8 +1,25 @@
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..ef4a2e0
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1 @@
++codex/handoff/*.patch -whitespace
 diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-index 344faf1..f051d90 100644
+index 344faf1..9eb2022 100644
 --- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-@@ -21,6 +21,8 @@ import com.lidquan.yishigame.action.ActionGuard
+@@ -11,6 +11,9 @@ import com.lidquan.yishigame.accessibility.GameAccessibilityService
+ import com.lidquan.yishigame.automation.AutomationEvent
+ import com.lidquan.yishigame.automation.EnvironmentChangeReason
+ import com.lidquan.yishigame.automation.RecoveryRequirement
++import com.lidquan.yishigame.automation.Req0006Precheck
++import com.lidquan.yishigame.automation.Req0006PrecheckInput
++import com.lidquan.yishigame.automation.Req0006PrecheckResult
+ import com.lidquan.yishigame.automation.AutomationState
+ import com.lidquan.yishigame.automation.AutomationStateMachine
+ import com.lidquan.yishigame.automation.WindowBounds
+@@ -21,6 +24,8 @@ import com.lidquan.yishigame.action.ActionGuard
  import com.lidquan.yishigame.action.ActionIntent
  import com.lidquan.yishigame.action.ActionType
  import com.lidquan.yishigame.action.GuardDecision
@@ -11,7 +28,7 @@ index 344faf1..f051d90 100644
  import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
  import com.lidquan.yishigame.capture.ScreenCaptureController
  import com.lidquan.yishigame.capture.ScreenCaptureState
-@@ -28,17 +30,25 @@ import com.lidquan.yishigame.capture.FrameMetadata
+@@ -28,17 +33,25 @@ import com.lidquan.yishigame.capture.FrameMetadata
  import com.lidquan.yishigame.config.TargetGameConfig
  import com.lidquan.yishigame.diagnostics.DiagnosticEvent
  import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
@@ -37,7 +54,7 @@ index 344faf1..f051d90 100644
  
  data class EnvironmentUiState(
      val automationState: AutomationState = AutomationState.IDLE,
-@@ -56,6 +66,9 @@ data class EnvironmentUiState(
+@@ -56,6 +69,9 @@ data class EnvironmentUiState(
      val windowGate: WindowGate = WindowGate.UNAVAILABLE,
      val deviceSummary: String = "",
      val recentEvents: List<DiagnosticEvent> = emptyList(),
@@ -47,7 +64,7 @@ index 344faf1..f051d90 100644
  ) {
      val canArmPlaceholder: Boolean get() =
          automationState == AutomationState.READY &&
-@@ -88,6 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -88,6 +104,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      private var lastCaptureActive = false
      private var lastVisionPackage = ""
      private var lastVisionGate: WindowGate? = null
@@ -59,7 +76,7 @@ index 344faf1..f051d90 100644
      private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
      val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
  
-@@ -142,7 +160,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -142,7 +163,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
              record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
              return
          }
@@ -75,16 +92,55 @@ index 344faf1..f051d90 100644
          visionWorker.invalidate()
          stateMachine.dispatch(AutomationEvent.DeviceReady)
          stateMachine.dispatch(AutomationEvent.CheckWindow)
-@@ -162,6 +187,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -162,6 +190,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          }
      }
  
 +    fun beginReq0006() {
 +        refresh()
-+        if (!mutableUiState.value.canArmPlaceholder || req0006Job?.isActive == true) {
-+            record("REQ-0006", "BLOCKED", "ENVIRONMENT_NOT_READY")
++        if (req0006Job?.isActive == true) {
++            record("REQ-0006", "BLOCKED", "ALREADY_RUNNING")
 +            return
 +        }
++        val snapshot = mutableUiState.value
++        val service = GameAccessibilityService.instance
++        val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
++        val windows = service?.queryWindows().orEmpty()
++        val gameWindow = windows
++            .filter { configuredPackage.isNotBlank() && it.packageName == configuredPackage }
++            .maxByOrNull { it.layer }
++        val assistantWindow = windows
++            .filter { it.packageName == appContext.packageName }
++            .maxByOrNull { it.layer }
++        val precheck = Req0006Precheck.evaluate(
++            Req0006PrecheckInput(
++                accessibilityEnabled = snapshot.accessibilityEnabled,
++                captureActive = snapshot.captureState is ScreenCaptureState.Active,
++                gameWindow = gameWindow?.bounds,
++                assistantWindow = assistantWindow?.bounds,
++                windowGate = snapshot.windowGate,
++                contentViewport = snapshot.contentViewport,
++                stablePageId = snapshot.visionMetrics.stablePage
++                    ?.takeIf { it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000 }
++                    ?.pageId,
++            ),
++        )
++        if (precheck is Req0006PrecheckResult.Failed) {
++            val error = "PRECHECK_" + precheck.reason.name
++            req0006State = "PRECHECK_FAILED"
++            req0006Error = error
++            record("REQ-0006_PRECHECK", "FAILED", error)
++            refresh()
++            return
++        }
++        if (!snapshot.canArmPlaceholder) {
++            req0006State = "PRECHECK_FAILED"
++            req0006Error = "PRECHECK_ENVIRONMENT_NOT_READY"
++            record("REQ-0006_PRECHECK", "FAILED", "PRECHECK_ENVIRONMENT_NOT_READY")
++            refresh()
++            return
++        }
++        record("REQ-0006_PRECHECK", "READY")
 +        req0006Pending = true
 +        req0006State = "WAIT_TARGET_ACTIVE"
 +        req0006Error = null
@@ -96,7 +152,7 @@ index 344faf1..f051d90 100644
      fun requestResumePlaceholder() {
          refresh()
          if (!mutableUiState.value.canRequestResume) {
-@@ -186,6 +225,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -186,6 +267,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  
      fun stop() {
          targetActivationTimeout?.cancel()
@@ -105,7 +161,7 @@ index 344faf1..f051d90 100644
          stateMachine.dispatch(AutomationEvent.Stop)
          captureController.stop()
          visionWorker.invalidate()
-@@ -207,7 +248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -207,7 +290,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  
      private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
          ActionGuard.plan(
@@ -114,7 +170,7 @@ index 344faf1..f051d90 100644
              ActionContext(
                  automationState = state.automationState,
                  accessibilityConnected = state.accessibilityEnabled,
-@@ -277,6 +318,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -277,6 +360,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                  record("AUTOMATION_PLACEHOLDER", "STARTED")
              }
          }
@@ -125,7 +181,7 @@ index 344faf1..f051d90 100644
          val priorInput = mutableUiState.value.targetPackageInput
          val refreshed = EnvironmentUiState(
              automationState = stateMachine.state.value,
-@@ -294,10 +339,213 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -294,10 +381,213 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
              windowGate = gate,
              deviceSummary = deviceSummary(),
              recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
@@ -339,7 +395,7 @@ index 344faf1..f051d90 100644
      private fun record(eventType: String, result: String, errorCode: String? = null) {
          DiagnosticRecorder.record(
              DiagnosticEvent(
-@@ -359,5 +607,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+@@ -359,5 +649,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          private const val contentViewportRightKey = "content_viewport_right"
          private const val contentViewportBottomKey = "content_viewport_bottom"
          private const val contentViewportProfileVersionKey = "content_viewport_profile_version"
@@ -493,6 +549,74 @@ index 0000000..78d3829
 +        else -> status
 +    }
 +}
+diff --git a/app/src/main/java/com/lidquan/yishigame/automation/Req0006Precheck.kt b/app/src/main/java/com/lidquan/yishigame/automation/Req0006Precheck.kt
+new file mode 100644
+index 0000000..6a01d29
+--- /dev/null
++++ b/app/src/main/java/com/lidquan/yishigame/automation/Req0006Precheck.kt
+@@ -0,0 +1,62 @@
++package com.lidquan.yishigame.automation
++
++enum class Req0006PrecheckFailure {
++    ACCESSIBILITY_UNAVAILABLE,
++    CAPTURE_INACTIVE,
++    GAME_WINDOW_MISSING,
++    ASSISTANT_WINDOW_MISSING,
++    WINDOW_NOT_MATCHED,
++    CONTENT_VIEWPORT_UNCONFIRMED,
++    LAYOUT_NOT_GAME_LEFT_ASSISTANT_RIGHT,
++    GAME_PAGE_NOT_STABLE,
++    GAME_NOT_AT_HOME,
++}
++
++data class Req0006PrecheckInput(
++    val accessibilityEnabled: Boolean,
++    val captureActive: Boolean,
++    val gameWindow: WindowBounds?,
++    val assistantWindow: WindowBounds?,
++    val windowGate: WindowGate,
++    val contentViewport: WindowBounds?,
++    val stablePageId: String?,
++)
++
++sealed interface Req0006PrecheckResult {
++    data object Ready : Req0006PrecheckResult
++    data class Failed(val reason: Req0006PrecheckFailure) : Req0006PrecheckResult
++}
++
++object Req0006Precheck {
++    private const val dividerTolerancePx = 24
++
++    fun evaluate(input: Req0006PrecheckInput): Req0006PrecheckResult {
++        if (!input.accessibilityEnabled) return failed(Req0006PrecheckFailure.ACCESSIBILITY_UNAVAILABLE)
++        if (!input.captureActive) return failed(Req0006PrecheckFailure.CAPTURE_INACTIVE)
++        val game = input.gameWindow?.takeIf { it.isValid }
++            ?: return failed(Req0006PrecheckFailure.GAME_WINDOW_MISSING)
++        val assistant = input.assistantWindow?.takeIf { it.isValid }
++            ?: return failed(Req0006PrecheckFailure.ASSISTANT_WINDOW_MISSING)
++        if (input.windowGate != WindowGate.MATCHED) return failed(Req0006PrecheckFailure.WINDOW_NOT_MATCHED)
++        if (input.contentViewport?.isValid != true) return failed(Req0006PrecheckFailure.CONTENT_VIEWPORT_UNCONFIRMED)
++        if (!isGameLeftAssistantRight(game, assistant)) {
++            return failed(Req0006PrecheckFailure.LAYOUT_NOT_GAME_LEFT_ASSISTANT_RIGHT)
++        }
++        val page = input.stablePageId ?: return failed(Req0006PrecheckFailure.GAME_PAGE_NOT_STABLE)
++        if (page != "HOME") return failed(Req0006PrecheckFailure.GAME_NOT_AT_HOME)
++        return Req0006PrecheckResult.Ready
++    }
++
++    internal fun isGameLeftAssistantRight(game: WindowBounds, assistant: WindowBounds): Boolean {
++        val gameCenterX = (game.left + game.right) / 2
++        val assistantCenterX = (assistant.left + assistant.right) / 2
++        val horizontalOrderOk = gameCenterX < assistantCenterX
++        val sideBySideOk = game.right <= assistant.left + dividerTolerancePx
++        val verticalOverlap = minOf(game.bottom, assistant.bottom) - maxOf(game.top, assistant.top)
++        val minHeight = minOf(game.bottom - game.top, assistant.bottom - assistant.top)
++        val sameRow = minHeight > 0 && verticalOverlap * 2 >= minHeight
++        return horizontalOrderOk && sideBySideOk && sameRow
++    }
++
++    private fun failed(reason: Req0006PrecheckFailure) = Req0006PrecheckResult.Failed(reason)
++}
 diff --git a/app/src/main/java/com/lidquan/yishigame/data/Daos.kt b/app/src/main/java/com/lidquan/yishigame/data/Daos.kt
 index a5ea8a3..536a5b2 100644
 --- a/app/src/main/java/com/lidquan/yishigame/data/Daos.kt
@@ -550,7 +674,7 @@ index 0000000..8ebe565
 +    }
 +}
 diff --git a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
-index fefd660..546f62f 100644
+index fefd660..2e294f3 100644
 --- a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
 @@ -114,6 +114,7 @@ fun AssistantApp(
@@ -579,13 +703,13 @@ index fefd660..546f62f 100644
          }
      }
  }
-@@ -179,10 +182,10 @@ private fun Controls(
+@@ -179,10 +182,9 @@ private fun Controls(
              ) { Text("请求并验证屏幕采集") }
              Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
              Button(
 -                onClick = viewModel::beginPlaceholder,
+-                enabled = state.canArmPlaceholder,
 +                onClick = viewModel::beginReq0006,
-                 enabled = state.canArmPlaceholder,
                  modifier = Modifier.fillMaxWidth(),
 -            ) { Text("准备启动（M0 占位）") }
 +            ) { Text("开始 REQ-0006 受控运行") }
@@ -1053,6 +1177,126 @@ index 0000000..d6d15c5
 +        assertEquals("FREE_ATTEMPT_UNCONFIRMED", result.errorCode)
 +    }
 +}
+diff --git a/app/src/test/java/com/lidquan/yishigame/automation/Req0006PrecheckTest.kt b/app/src/test/java/com/lidquan/yishigame/automation/Req0006PrecheckTest.kt
+new file mode 100644
+index 0000000..0dcca0c
+--- /dev/null
++++ b/app/src/test/java/com/lidquan/yishigame/automation/Req0006PrecheckTest.kt
+@@ -0,0 +1,114 @@
++package com.lidquan.yishigame.automation
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class Req0006PrecheckTest {
++    private val game = WindowBounds(0, 0, 1600, 1200)
++    private val assistant = WindowBounds(1600, 0, 2560, 1200)
++    private val viewport = WindowBounds(20, 20, 1580, 1180)
++
++    private fun input(
++        gameWindow: WindowBounds? = game,
++        assistantWindow: WindowBounds? = assistant,
++        stablePageId: String? = "HOME",
++        windowGate: WindowGate = WindowGate.MATCHED,
++        accessibilityEnabled: Boolean = true,
++        captureActive: Boolean = true,
++        contentViewport: WindowBounds? = viewport,
++    ) = Req0006PrecheckInput(
++        accessibilityEnabled = accessibilityEnabled,
++        captureActive = captureActive,
++        gameWindow = gameWindow,
++        assistantWindow = assistantWindow,
++        windowGate = windowGate,
++        contentViewport = contentViewport,
++        stablePageId = stablePageId,
++    )
++
++    @Test
++    fun ready_whenGameIsLeftAssistantIsRightAndHomeIsStable() {
++        assertTrue(Req0006Precheck.evaluate(input()) is Req0006PrecheckResult.Ready)
++    }
++
++    @Test
++    fun blocks_whenAssistantWindowIsMissing() {
++        val result = Req0006Precheck.evaluate(input(assistantWindow = null))
++        assertEquals(
++            Req0006PrecheckFailure.ASSISTANT_WINDOW_MISSING,
++            (result as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenLayoutIsReversed() {
++        val result = Req0006Precheck.evaluate(
++            input(
++                gameWindow = WindowBounds(1600, 0, 2560, 1200),
++                assistantWindow = WindowBounds(0, 0, 1600, 1200),
++            ),
++        )
++        assertEquals(
++            Req0006PrecheckFailure.LAYOUT_NOT_GAME_LEFT_ASSISTANT_RIGHT,
++            (result as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenGameIsNotAtStableHome() {
++        val result = Req0006Precheck.evaluate(input(stablePageId = "AREA_MAP"))
++        assertEquals(
++            Req0006PrecheckFailure.GAME_NOT_AT_HOME,
++            (result as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenAccessibilityIsUnavailable() {
++        assertEquals(
++            Req0006PrecheckFailure.ACCESSIBILITY_UNAVAILABLE,
++            (Req0006Precheck.evaluate(input(accessibilityEnabled = false)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenCaptureIsInactive() {
++        assertEquals(
++            Req0006PrecheckFailure.CAPTURE_INACTIVE,
++            (Req0006Precheck.evaluate(input(captureActive = false)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenGameWindowIsMissing() {
++        assertEquals(
++            Req0006PrecheckFailure.GAME_WINDOW_MISSING,
++            (Req0006Precheck.evaluate(input(gameWindow = null)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenViewportIsUnconfirmed() {
++        assertEquals(
++            Req0006PrecheckFailure.CONTENT_VIEWPORT_UNCONFIRMED,
++            (Req0006Precheck.evaluate(input(contentViewport = null)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenPageIsNotStable() {
++        assertEquals(
++            Req0006PrecheckFailure.GAME_PAGE_NOT_STABLE,
++            (Req0006Precheck.evaluate(input(stablePageId = null)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++
++    @Test
++    fun blocks_whenWindowGateIsNotMatched() {
++        assertEquals(
++            Req0006PrecheckFailure.WINDOW_NOT_MATCHED,
++            (Req0006Precheck.evaluate(input(windowGate = WindowGate.CHANGED)) as Req0006PrecheckResult.Failed).reason,
++        )
++    }
++}
 diff --git a/app/src/test/java/com/lidquan/yishigame/viewport/ContentViewportDetectorTest.kt b/app/src/test/java/com/lidquan/yishigame/viewport/ContentViewportDetectorTest.kt
 new file mode 100644
 index 0000000..5c6b803
@@ -1148,3 +1392,1914 @@ index 0000000..10fcbf3
 +        assertEquals(CounterValue(5, 5), parseCounter("进度 5/5"))
 +    }
 +}
+diff --git a/codex/handoff/LATEST.md b/codex/handoff/LATEST.md
+index d37142f..8d435b7 100644
+--- a/codex/handoff/LATEST.md
++++ b/codex/handoff/LATEST.md
+@@ -1,66 +1,54 @@
+-# ChatGPT 第三轮复审交接
++# 最新交接：REQ-0006（未完成）
+ 
+-## 当前任务编号
++- 当前任务编号：`REQ-0006`
++- 当前版本：`0.2.0-m1`（debug）
++- 分支：`feat/req-0006-single-dungeon-loop`
++- 完整实现 commit hash：`c3820ff687b25c77ee265e898c98c79203b02366`
++- 本次修改摘要：增加受 Guard 控制的真实 tap 执行器、单副本运行逻辑、区域/地下城/详情/战斗视觉信号、免费次数与进度解析、DailyExecution、私有结构化日志及测试。**未跑通完整副本。**
+ 
+-REQ-0005
+-
+-## 当前版本
+-
+-第二轮 REVIEW-0005 BLOCKER/REQUIRED 修复版；等待第三轮 Review。
+-
+-## 本次修改摘要
+-
+-ActionPolicy 已中心化；FreeAttemptState 仅消费显式 FREE_ATTEMPT semantic ROI；页面 anchor 与动作目标分流，动作目标使用真实 OCR boundingBox 并检查 contentViewport；Stop 后同一 VisionWorker 可继续处理新 capture；Template negative 统一归 PageDefinition。没有新增需求、Action Executor 或游戏输入。
+-
+-## 完整 commit hash
+-
+-`fd0f318daa8135ea33393dba36d45ec68b3d64c6`
+-
+-该 hash 为本轮实现提交；本交接与 patch 由后续元数据提交归档。
+-
+-## git diff --stat
++## git diff --stat（main 基线至实现提交）
+ 
+ ```text
+-14 files changed, 190 insertions(+), 62 deletions(-)
++ .../java/com/lidquan/yishigame/MainViewModel.kt    | 255 ++++++++++++++++++++-
++ .../com/lidquan/yishigame/action/ActionExecutor.kt |  40 ++++
++ .../com/lidquan/yishigame/action/ActionGuard.kt    |  23 +-
++ .../com/lidquan/yishigame/automation/DungeonRun.kt |  43 ++++
++ .../main/java/com/lidquan/yishigame/data/Daos.kt   |   1 +
++ .../com/lidquan/yishigame/diagnostics/RunLogger.kt |  38 +++
++ .../java/com/lidquan/yishigame/ui/AssistantApp.kt  |   9 +-
++ .../yishigame/viewport/ContentViewportDetector.kt  |  38 +++
++ .../yishigame/vision/ConfiguredVisionEngine.kt     | 137 ++++++++++-
++ .../com/lidquan/yishigame/vision/VisionModels.kt   |   7 +
++ .../com/lidquan/yishigame/vision/VisionWorker.kt   |  12 +
++ .../com/lidquan/yishigame/vision/ocr/OcrEngine.kt  |  15 +-
++ .../lidquan/yishigame/action/ActionExecutorTest.kt |  42 ++++
++ .../lidquan/yishigame/action/ActionGuardTest.kt    |   2 +-
++ .../yishigame/automation/DungeonRunReducerTest.kt  |  36 +++
++ .../viewport/ContentViewportDetectorTest.kt        |  32 +++
++ .../yishigame/vision/VisionConfigurationTest.kt    |   7 +-
++ .../yishigame/vision/ocr/CounterParserTest.kt      |  28 +++
++18 files changed, 739 insertions(+), 26 deletions(-)
+ ```
+ 
+-比较范围：`6a5535316855a36889940bb202edd80a65f8dcd2..fd0f318daa8135ea33393dba36d45ec68b3d64c6`。完整差异见 `codex/handoff/LATEST.patch`。
+-
+-## 关键代码改动说明
+-
+-- ActionIntent 不再接受 risk、target 或 policy 字段；ActionContext 不再接受 allowedPages 或 expectedPagesAfter。
+-- Registry 固定敏感与永久禁止策略，未知/缺失 policy 默认 POLICY_MISSING。
+-- 普通 OCR、FREE_ATTEMPT OCR 和动作目标证据完全分流。
+-- `dungeon.switch_region` 来自真实按钮文字 line boundingBox；UI显示 targetRect/tapPoint，但不会执行。
+-- Guard 新增 TARGET_OUTSIDE_VIEWPORT。
+-- Stop 使用 invalidate；onCleared 才 cancel worker。
+-- 删除 TemplateDefinition、manifest、sampler 中重复的 negative 字段。
+-
+-## 测试结果
+-
+-- JVM：31 项通过，0 失败，0 跳过。
+-- Android connected tests：通过。
+-- 最终 APK 私有三页 fixture：1 项通过，1.571 秒。
+-- Pad Inspector / Vision Sampler：6 项通过。
+-- ActionPolicy 绕过、semantic free isolation、OCR实际矩形、视口包含、worker恢复测试均通过。
+-- 安全扫描（含历史）与 `git diff --check` 通过。
+-- 全程 0 游戏 gesture。
++完整代码差异见 `codex/handoff/LATEST.patch`，其基线为 `450875226388ca4eefff4e4ada772a8c41a814d4`，终点为上述实现提交。
+ 
+-## 错误信息
++## 关键代码改动与测试结果
+ 
+-- Gradle 重装仍会清除应用私有 fixture；测试按既定流程在最终 APK 上重新注入本机私有样本后直接运行并通过。
+-- Android SDK XML 版本提示不阻塞。
++- `MainViewModel` 驱动有限次数/时长的单次运行；失败与成功写 DailyExecution。
++- `ActionExecutor` 执行 Guard 允许的辅助功能 tap 并验证后置页面；购买动作仍被策略禁止。
++- `ConfiguredVisionEngine` 单次 OCR 复用、页面与区域信号、详情页免费次数、战斗进度以及首个列表免费角标。
++- `RunLogger` 将业务状态及动作记录到 App 私有目录，公开仓库只提交脱敏摘要。
++- 构建与 40 个 JVM 测试通过；设备测试 3 通过、1 因缺少私有样本跳过；公开仓库安全扫描、`git diff --check` 通过。
+ 
+-## 尚未解决的问题
++## 错误与未解决问题
+ 
+-- OCR动作目标是按钮文字矩形，不是完整按钮外框；未来真实 Executor 前仍需更强的已审核视觉目标。
+-- 免费次数真实 ROI 尚未确认，默认 UNKNOWN。
+-- 非等值 contentViewport 校准入口按 R2 结论留待后续。
++- 已观察的真实区域选择动作之后，页面后置条件超时：`ACTION_SELECT_AREA_BLOCKED_OR_UNVERIFIED`。识别逻辑已调整，仍待联网真机回归。
++- 游戏出现“网络错误 / 已与服务器断开连接”，本轮无法继续完整业务测试。
++- 自动战斗 OFF / MISSING 无可靠识别，当前 UNKNOWN 时安全停止；首个副本角标 ROI、实际副本 ID 与同日去重也未真机验收。
++- 没有任何 `SUCCESS` 会话，不满足 REQ-0006 验收。原始早期会话日志因设备测试重装助手而未保留；报告没有伪造 sessionId、免费次数或进度。
+ 
+-## 希望 ChatGPT 重点审查的内容
++## 希望 ChatGPT 重点审查
+ 
+-- 调用方是否已无法降低风险、扩大 allowedPages 或伪造 expectedPagesAfter。
+-- FREE_ATTEMPT 是否与普通/其他 semantic OCR 完全隔离。
+-- ActionTargetEvidence 与页面 evidence 的边界、实际 rect 和视口包含检查。
+-- Stop 后常驻 worker 的恢复行为。
+-- Template negative 是否已成为 PageDefinition 单一事实来源。
++1. 是否接受当前“先安全停止、不误点”的未完成分支交接，还是要求继续真机采样后再 Review。
++2. 区域切换后置条件、T06 角标 ROI、T07 免费次数和 Guard 目标矩形是否足够精确。
++3. 自动战斗识别、真实副本 ID 去重和日志完整性是否满足第 21/22 节；当前结论是**尚未满足**。
+diff --git a/codex/handoff/LATEST.patch b/codex/handoff/LATEST.patch
+index 43c6afb..5b7bbd2 100644
+--- a/codex/handoff/LATEST.patch
++++ b/codex/handoff/LATEST.patch
+@@ -1,559 +1,1150 @@
+-diff --git a/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt b/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
+-index 747bc6b..afcefa1 100644
+---- a/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
+-+++ b/app/src/androidTest/java/com/lidquan/yishigame/vision/RealVisionFixtureTest.kt
+-@@ -12,7 +12,6 @@ import com.lidquan.yishigame.action.ActionGuard
+- import com.lidquan.yishigame.action.ActionIntent
+- import com.lidquan.yishigame.action.ActionType
+- import com.lidquan.yishigame.action.GuardDecision
+--import com.lidquan.yishigame.action.RiskLevel
+- import com.lidquan.yishigame.automation.AutomationState
+- import com.lidquan.yishigame.automation.WindowGate
+- import com.lidquan.yishigame.capture.ScreenCaptureState
+-@@ -53,7 +52,9 @@ class RealVisionFixtureTest {
+-     }
+-
+-     private fun assertDungeonDryRun(detection: PageDetection.Matched, analysis: VisionAnalysis, viewport: WindowBounds) {
+--        val anchor = detection.evidences.first { it.id == "dungeon.anchor" }.rect
+-+        val target = analysis.actionTargets.single { it.id == "dungeon.switch_region" }.rect
+-+        assertTrue(target.isValid && target.width < viewport.width && target.height < viewport.height)
+-+        assertTrue(detection.evidences.none { it.id == "dungeon.switch_region" })
+-         val stable = StablePage(detection.pageId, detection.confidence, 1_000, 7, detection.evidences.associate { it.id to it.rect })
+-         val context = ActionContext(
+-             automationState = AutomationState.RUNNING_PLACEHOLDER,
+-@@ -62,20 +63,18 @@ class RealVisionFixtureTest {
+-             targetVisible = true,
+-             targetActive = true,
+-             windowGate = WindowGate.MATCHED,
+--            viewportValid = viewport.isValid,
+-+            contentViewport = viewport,
+-             stablePage = stable,
+-             currentViewportVersion = 7,
+-             now = 1_100,
+--            allowedPages = setOf("DUNGEON_LIST"),
+--            targetRect = anchor,
+--            expectedPagesAfter = setOf("DUNGEON_LIST"),
+-+            actionTargets = analysis.actionTargets.associate { it.id to it.rect },
+-             freeAttemptState = analysis.freeAttemptState,
+-         )
+--        val intent = ActionIntent(ActionType.OPEN_DUNGEON, "dungeon.anchor", RiskLevel.NORMAL)
+-+        val intent = ActionIntent(ActionType.OPEN_DUNGEON)
+-         assertTrue(ActionGuard.plan(intent, context) is GuardDecision.AllowDryRun)
+-         assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, context.copy(targetActive = false)) as GuardDecision.Deny).reason)
+-         assertEquals(com.lidquan.yishigame.action.GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, context.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
+--        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, context.copy(targetRect = null)) as GuardDecision.Deny).reason)
+-+        assertEquals(com.lidquan.yishigame.action.GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, context.copy(actionTargets = emptyMap())) as GuardDecision.Deny).reason)
+-     }
+-
+-     private fun metadata(file: File): WindowBounds {
+ diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+-index b7cb82c..344faf1 100644
++index 344faf1..f051d90 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
+-@@ -21,7 +21,6 @@ import com.lidquan.yishigame.action.ActionGuard
++@@ -21,6 +21,8 @@ import com.lidquan.yishigame.action.ActionGuard
+  import com.lidquan.yishigame.action.ActionIntent
+  import com.lidquan.yishigame.action.ActionType
+  import com.lidquan.yishigame.action.GuardDecision
+--import com.lidquan.yishigame.action.RiskLevel
+++import com.lidquan.yishigame.action.ActionExecutor
+++import com.lidquan.yishigame.action.ActionExecution
+  import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
+  import com.lidquan.yishigame.capture.ScreenCaptureController
+  import com.lidquan.yishigame.capture.ScreenCaptureState
+-@@ -189,7 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++@@ -28,17 +30,25 @@ import com.lidquan.yishigame.capture.FrameMetadata
++ import com.lidquan.yishigame.config.TargetGameConfig
++ import com.lidquan.yishigame.diagnostics.DiagnosticEvent
++ import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
+++import com.lidquan.yishigame.diagnostics.RunLogger
+++import com.lidquan.yishigame.data.AppDatabase
+++import com.lidquan.yishigame.data.DailyExecutionEntity
+++import com.lidquan.yishigame.automation.AutoBattleState
++ import com.lidquan.yishigame.vision.VisionMetrics
++ import com.lidquan.yishigame.vision.VisionWorker
++ import com.lidquan.yishigame.vision.ConfiguredVisionEngine
++ import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
++ import com.lidquan.yishigame.viewport.WindowGeometry
+++import com.lidquan.yishigame.viewport.ContentViewportDetector
++ import kotlinx.coroutines.flow.MutableStateFlow
++ import kotlinx.coroutines.flow.StateFlow
++ import kotlinx.coroutines.flow.asStateFlow
++ import kotlinx.coroutines.Job
++ import kotlinx.coroutines.delay
++ import kotlinx.coroutines.launch
+++import java.text.SimpleDateFormat
+++import java.util.Date
+++import java.util.Locale
++ 
++ data class EnvironmentUiState(
++     val automationState: AutomationState = AutomationState.IDLE,
++@@ -56,6 +66,9 @@ data class EnvironmentUiState(
++     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
++     val deviceSummary: String = "",
++     val recentEvents: List<DiagnosticEvent> = emptyList(),
+++    val req0006SessionId: String? = null, // public-scan: allow - runtime ID, not a credential
+++    val req0006State: String = "IDLE",
+++    val req0006Error: String? = null,
++ ) {
++     val canArmPlaceholder: Boolean get() =
++         automationState == AutomationState.READY &&
++@@ -88,6 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++     private var lastCaptureActive = false
++     private var lastVisionPackage = ""
++     private var lastVisionGate: WindowGate? = null
+++    private var req0006Pending = false
+++    private var req0006Job: Job? = null
+++    private var req0006SessionId: String? = null // public-scan: allow - runtime ID, not a credential
+++    private var req0006State: String = "IDLE"
+++    private var req0006Error: String? = null
++     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
++     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
++ 
++@@ -142,7 +160,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
++             return
++         }
++-        acceptContentViewportProfile(snapshot.windowBounds, snapshot.windowBounds)
+++        val frame = captureController.frameStore.latestSnapshot()
+++        val contentViewport = frame?.let { ContentViewportDetector.detect(it, snapshot.windowBounds) }
+++        if (contentViewport == null) {
+++            stateMachine.dispatch(AutomationEvent.Fail("ENV_CONTENT_VIEWPORT_UNCONFIRMED"))
+++            record("PRECHECK", "FAILED", "ENV_CONTENT_VIEWPORT_UNCONFIRMED")
+++            return
+++        }
+++        acceptContentViewportProfile(snapshot.windowBounds, contentViewport)
++         visionWorker.invalidate()
++         stateMachine.dispatch(AutomationEvent.DeviceReady)
++         stateMachine.dispatch(AutomationEvent.CheckWindow)
++@@ -162,6 +187,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++         }
++     }
++ 
+++    fun beginReq0006() {
+++        refresh()
+++        if (!mutableUiState.value.canArmPlaceholder || req0006Job?.isActive == true) {
+++            record("REQ-0006", "BLOCKED", "ENVIRONMENT_NOT_READY")
+++            return
+++        }
+++        req0006Pending = true
+++        req0006State = "WAIT_TARGET_ACTIVE"
+++        req0006Error = null
+++        req0006SessionId = null
+++        beginPlaceholder()
+++        refresh()
+++    }
+++
++     fun requestResumePlaceholder() {
++         refresh()
++         if (!mutableUiState.value.canRequestResume) {
++@@ -186,6 +225,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++ 
++     fun stop() {
+          targetActivationTimeout?.cancel()
+++        req0006Job?.cancel()
+++        req0006Pending = false
+          stateMachine.dispatch(AutomationEvent.Stop)
+          captureController.stop()
+--        visionWorker.stop()
+-+        visionWorker.invalidate()
+-         record("STOP", "STOPPED")
+-     }
+-
+-@@ -208,7 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+-
++         visionWorker.invalidate()
++@@ -207,7 +248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++ 
+      private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
+          ActionGuard.plan(
+--            ActionIntent(ActionType.OPEN_DUNGEON, targetId = "dungeon.anchor", riskLevel = RiskLevel.NORMAL),
+-+            ActionIntent(ActionType.OPEN_DUNGEON),
++-            ActionIntent(ActionType.OPEN_DUNGEON),
+++            ActionIntent(ActionType.OPEN_DUNGEON_LIST),
+              ActionContext(
+                  automationState = state.automationState,
+                  accessibilityConnected = state.accessibilityEnabled,
+-@@ -216,13 +215,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+-                 targetVisible = state.targetVisible,
+-                 targetActive = state.targetActive,
+-                 windowGate = state.windowGate,
+--                viewportValid = state.contentViewport?.isValid == true,
+-+                contentViewport = state.contentViewport,
+-                 stablePage = state.visionMetrics.stablePage,
+-                 currentViewportVersion = windowMonitor.version,
+-                 now = System.currentTimeMillis(),
+--                allowedPages = setOf("DUNGEON_LIST"),
+--                targetRect = state.visionMetrics.stablePage?.anchors?.get("dungeon.anchor"),
+--                expectedPagesAfter = setOf("DUNGEON_LIST"),
+-+                actionTargets = state.visionMetrics.actionTargets,
+-             ),
++@@ -277,6 +318,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++                 record("AUTOMATION_PLACEHOLDER", "STARTED")
++             }
++         }
+++        if (req0006Pending && stateMachine.state.value == AutomationState.RUNNING_PLACEHOLDER && req0006Job?.isActive != true) {
+++            req0006Pending = false
+++            req0006Job = viewModelScope.launch { runReq0006() }
+++        }
++         val priorInput = mutableUiState.value.targetPackageInput
++         val refreshed = EnvironmentUiState(
++             automationState = stateMachine.state.value,
++@@ -294,10 +339,213 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++             windowGate = gate,
++             deviceSummary = deviceSummary(),
++             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
+++            req0006SessionId = req0006SessionId, // public-scan: allow - runtime ID, not a credential
+++            req0006State = req0006State,
+++            req0006Error = req0006Error,
+          )
+-
++         mutableUiState.value = refreshed.copy(dryRunDecision = dungeonAnchorDryRun(refreshed))
++     }
++ 
+++    private suspend fun runReq0006() {
+++        val logger = RunLogger(appContext)
+++        logger.start(mapOf(
+++            "startedAt" to System.currentTimeMillis(),
+++            "currentRoleKey" to "current-role",
+++            "appVersion" to appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName,
+++        ))
+++        req0006SessionId = logger.sessionId // public-scan: allow - runtime ID, not a credential
+++        req0006State = "STARTED"
+++        val dao = AppDatabase.get(appContext).dailyExecutionDao()
+++        val dayKey = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+++        val dailyId = "${dayKey}:current-role:first-free-dungeon"
+++        val prior = dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon")
+++        if (prior?.status == "SUCCESS") {
+++            finishReq0006(logger, "SKIPPED", "DAILY_ALREADY_SUCCESS")
+++            return
+++        }
+++        dao.upsert(DailyExecutionEntity(
+++            id = dailyId, gameDayKey = dayKey, roleId = "current-role", actionType = "DUNGEON",
+++            targetId = "first-free-dungeon", status = "RUNNING", attemptCount = (prior?.attemptCount ?: 0) + 1,
+++            startedAt = System.currentTimeMillis(),
+++        ))
+++        val runningRecord = requireNotNull(dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon"))
+++        val controller = GameAccessibilityService.instance
+++        if (controller == null) {
+++            persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ACCESSIBILITY_UNAVAILABLE")
+++            return
+++        }
+++        val executor = ActionExecutor(controller)
+++        var actions = 0
+++        var lastProgressCurrent: Int? = null
+++        var previousBusinessState: String? = null
+++        var dungeonCompleted = false
+++        var enteredBattle = false
+++        var areaSelectionIssued = false
+++        val deadline = System.currentTimeMillis() + req0006TimeoutMillis
+++        while (System.currentTimeMillis() < deadline && actions < req0006MaxActions) {
+++            if (stateMachine.state.value != AutomationState.RUNNING_PLACEHOLDER) {
+++                persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ENVIRONMENT_CHANGED")
+++                return
+++            }
+++            val snapshot = mutableUiState.value
+++            val page = snapshot.visionMetrics.stablePage?.pageId
+++            val progress = snapshot.visionMetrics.progress
+++            req0006State = page ?: "WAIT_STABLE_PAGE"
+++            logger.state(mapOf(
+++                "businessState" to req0006State,
+++                "previousState" to previousBusinessState,
+++                "stablePage" to page,
+++                "currentMap" to snapshot.visionMetrics.currentMap,
+++                "currentDungeon" to snapshot.visionMetrics.currentDungeon,
+++                "freeAttemptState" to snapshot.visionMetrics.freeAttemptState.name,
+++                "progressCurrent" to progress?.current,
+++                "progressTotal" to progress?.total,
+++                "autoBattleState" to snapshot.visionMetrics.autoBattleState.name,
+++            ))
+++            previousBusinessState = req0006State
+++            if (progress?.current != null && progress.current != lastProgressCurrent) lastProgressCurrent = progress.current
+++            if (page == "BATTLE") {
+++                enteredBattle = true
+++                if (progress != null && progress.current == progress.total) dungeonCompleted = true
+++            }
+++            val intent = when (page) {
+++                "SAFE_DIALOG" -> {
+++                    persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "GAME_DIALOG_REQUIRES_USER")
+++                    return
+++                }
+++                "CHARACTER_SELECT" -> ActionIntent(ActionType.ENTER_GAME)
+++                "HOME" -> {
+++                    if (dungeonCompleted) {
+++                        dao.upsert(runningRecord.copy(status = "SUCCESS", finishedAt = System.currentTimeMillis(), resultCode = "SUCCESS", errorCode = null))
+++                        finishReq0006(logger, "SUCCESS", null)
+++                        return
+++                    }
+++                    if (enteredBattle) {
+++                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "DUNGEON_INCOMPLETE")
+++                        return
+++                    }
+++                    ActionIntent(ActionType.OPEN_AREA_MAP)
+++                }
+++                "AREA_MAP" -> when {
+++                    !areaSelectionIssued -> ActionIntent(ActionType.OPEN_AREA_SWITCH)
+++                    snapshot.visionMetrics.currentMap == req0006TargetArea -> ActionIntent(ActionType.OPEN_DUNGEON_LIST)
+++                    else -> {
+++                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AREA_SWITCH_UNVERIFIED")
+++                        return
+++                    }
+++                }
+++                "AREA_PICKER" -> ActionIntent(ActionType.SELECT_AREA)
+++                "DUNGEON_LIST" -> ActionIntent(ActionType.SELECT_DUNGEON)
+++                "DUNGEON_DETAIL" -> {
+++                    if (snapshot.visionMetrics.freeAttemptState != com.lidquan.yishigame.vision.FreeAttemptState.AVAILABLE) {
+++                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "FREE_ATTEMPT_UNCONFIRMED")
+++                        return
+++                    }
+++                    ActionIntent(ActionType.START_DUNGEON_FREE)
+++                }
+++                "BATTLE" -> when {
+++                    progress != null && progress.current == progress.total -> {
+++                        delay(1_000)
+++                        continue
+++                    }
+++                    snapshot.visionMetrics.autoBattleState == AutoBattleState.OFF -> ActionIntent(ActionType.ENABLE_AUTO_BATTLE)
+++                    snapshot.visionMetrics.autoBattleState == AutoBattleState.MISSING -> {
+++                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "MANUAL_BATTLE_REQUIRED")
+++                        return
+++                    }
+++                    snapshot.visionMetrics.autoBattleState == AutoBattleState.UNKNOWN -> {
+++                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AUTO_BATTLE_UNCONFIRMED")
+++                        return
+++                    }
+++                    else -> {
+++                        delay(1_000)
+++                        continue
+++                    }
+++                }
+++                else -> {
+++                    delay(500)
+++                    continue
+++                }
+++            }
+++            val execution = executor.execute(intent, actionContext(snapshot)) { expected, timeout -> awaitStablePage(expected, timeout) }
+++            actions++
+++            logAction(logger, intent, execution, actions)
+++            if (execution.decision is GuardDecision.Deny || execution.tapResult != true || !execution.postconditionMet) {
+++                persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ACTION_${intent.type.name}_BLOCKED_OR_UNVERIFIED")
+++                return
+++            }
+++            if (intent.type == ActionType.SELECT_AREA) areaSelectionIssued = true
+++        }
+++        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", if (actions >= req0006MaxActions) "MAX_ACTIONS_REACHED" else "RUN_TIMEOUT")
+++    }
+++
+++    private fun actionContext(state: EnvironmentUiState) = ActionContext(
+++        automationState = state.automationState,
+++        accessibilityConnected = state.accessibilityEnabled,
+++        captureState = state.captureState,
+++        targetVisible = state.targetVisible,
+++        targetActive = state.targetActive,
+++        windowGate = state.windowGate,
+++        contentViewport = state.contentViewport,
+++        stablePage = state.visionMetrics.stablePage,
+++        currentViewportVersion = windowMonitor.version,
+++        now = System.currentTimeMillis(),
+++        actionTargets = state.visionMetrics.actionTargets,
+++        freeAttemptState = state.visionMetrics.freeAttemptState,
+++        dailyAlreadySuccess = false,
+++    )
+++
+++    private suspend fun awaitStablePage(expected: Set<String>, timeoutMs: Long): String? {
+++        val deadline = System.currentTimeMillis() + timeoutMs
+++        while (System.currentTimeMillis() < deadline) {
+++            mutableUiState.value.visionMetrics.stablePage?.pageId?.let { if (it in expected) return it }
+++            delay(250)
+++        }
+++        return null
+++    }
+++
+++    private fun logAction(logger: RunLogger, intent: ActionIntent, execution: ActionExecution, retryIndex: Int) {
+++        val allow = execution.decision as? GuardDecision.AllowDryRun
+++        logger.action(mapOf(
+++            "ActionIntent" to intent.type.name,
+++            "policy" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.riskLevel?.name,
+++            "pageBefore" to allow?.plan?.expectedPageBefore,
+++            "targetId" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.requiredTargetId,
+++            "targetRect" to allow?.plan?.targetRect?.toString(),
+++            "GuardDecision" to execution.decision::class.simpleName,
+++            "tapResult" to execution.tapResult,
+++            "expectedPostcondition" to allow?.plan?.expectedPageAfter?.joinToString(),
+++            "pageAfter" to execution.pageAfter,
+++            "durationMs" to execution.durationMs,
+++            "retryIndex" to retryIndex,
+++            "errorCode" to if (execution.postconditionMet) null else "ACTION_${intent.type.name}_UNVERIFIED",
+++        ))
+++    }
+++
+++    private suspend fun persistAndFinishReq0006(
+++        logger: RunLogger,
+++        dao: com.lidquan.yishigame.data.DailyExecutionDao,
+++        runningRecord: DailyExecutionEntity,
+++        result: String,
+++        error: String?,
+++    ) {
+++        dao.upsert(runningRecord.copy(
+++            status = result,
+++            finishedAt = System.currentTimeMillis(),
+++            resultCode = result,
+++            errorCode = error,
+++        ))
+++        finishReq0006(logger, result, error)
+++    }
+++
+++    private fun finishReq0006(logger: RunLogger, result: String, error: String?) {
+++        req0006State = result
+++        req0006Error = error
+++        logger.finish(result, error)
+++        record("REQ-0006", result, error)
+++        refresh()
+++    }
+++
++     private fun record(eventType: String, result: String, errorCode: String? = null) {
++         DiagnosticRecorder.record(
++             DiagnosticEvent(
++@@ -359,5 +607,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
++         private const val contentViewportRightKey = "content_viewport_right"
++         private const val contentViewportBottomKey = "content_viewport_bottom"
++         private const val contentViewportProfileVersionKey = "content_viewport_profile_version"
+++        private const val req0006TimeoutMillis = 10 * 60_000L
+++        private const val req0006MaxActions = 20
+++        private const val req0006TargetArea = "亡灵之地"
++     }
++ }
++diff --git a/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt b/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt
++new file mode 100644
++index 0000000..6534d8a
++--- /dev/null
+++++ b/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt
++@@ -0,0 +1,40 @@
+++package com.lidquan.yishigame.action
+++
+++import com.lidquan.yishigame.accessibility.AccessibilityController
+++
+++data class ActionExecution(
+++    val decision: GuardDecision,
+++    val tapResult: Boolean? = null,
+++    val pageAfter: String? = null,
+++    val postconditionMet: Boolean = false,
+++    val durationMs: Long = 0,
+++)
+++
+++/** The only production path from a business intent to a game tap. */
+++class ActionExecutor(
+++    private val controller: AccessibilityController,
+++    private val clock: () -> Long = System::currentTimeMillis,
+++) {
+++    suspend fun execute(
+++        intent: ActionIntent,
+++        context: ActionContext,
+++        awaitPage: suspend (expected: Set<String>, timeoutMs: Long) -> String?,
+++    ): ActionExecution {
+++        val startedAt = clock()
+++        val decision = ActionGuard.plan(intent, context)
+++        if (decision !is GuardDecision.AllowDryRun) {
+++            return ActionExecution(decision = decision, durationMs = (clock() - startedAt).coerceAtLeast(0))
+++        }
+++        val result = runCatching {
+++            controller.tap(decision.plan.tapPoint.x.toFloat(), decision.plan.tapPoint.y.toFloat())
+++        }.getOrDefault(false)
+++        val pageAfter = if (result) awaitPage(decision.plan.expectedPageAfter, decision.plan.timeoutMs) else null
+++        return ActionExecution(
+++            decision = decision,
+++            tapResult = result,
+++            pageAfter = pageAfter,
+++            postconditionMet = pageAfter in decision.plan.expectedPageAfter,
+++            durationMs = (clock() - startedAt).coerceAtLeast(0),
+++        )
+++    }
+++}
+ diff --git a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
+-index 66d9f5d..24f4f1c 100644
++index 24f4f1c..705b3d9 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
+-@@ -10,9 +10,30 @@ import com.lidquan.yishigame.vision.StablePage
+-
+- enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
++@@ -8,7 +8,13 @@ import com.lidquan.yishigame.viewport.ScreenPoint
++ import com.lidquan.yishigame.vision.FreeAttemptState
++ import com.lidquan.yishigame.vision.StablePage
++ 
++-enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
+++enum class ActionType {
+++    OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, ENTER_GAME,
+++    OPEN_DUNGEON,
+++    OPEN_AREA_MAP, OPEN_AREA_SWITCH, SELECT_AREA, OPEN_DUNGEON_LIST,
+++    SELECT_DUNGEON, START_DUNGEON_FREE, ENABLE_AUTO_BATTLE,
+++    CLOSE_SAFE_DIALOG, PURCHASE,
+++}
+  enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
+--enum class GuardDenyReason { AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, POSTCONDITION_MISSING, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
+-+enum class GuardDenyReason { POLICY_MISSING, AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, TARGET_OUTSIDE_VIEWPORT, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
+-
+--data class ActionIntent(val type: ActionType, val targetId: String? = null, val riskLevel: RiskLevel)
+-+data class ActionPolicy(
+-+    val riskLevel: RiskLevel,
+-+    val allowedPages: Set<String>,
+-+    val requiredTargetId: String,
+-+    val expectedPagesAfter: Set<String>,
++ enum class GuardDenyReason { POLICY_MISSING, AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, TARGET_OUTSIDE_VIEWPORT, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
++ 
++@@ -24,9 +30,16 @@ object ActionPolicyRegistry {
++         ActionType.OPEN_SETTINGS to ActionPolicy(RiskLevel.SAFE, setOf("MAIN"), "main.settings", setOf("SETTINGS")),
++         ActionType.RETURN_CHARACTER_SELECT to ActionPolicy(RiskLevel.NORMAL, setOf("SETTINGS"), "settings.return_character", setOf("CHARACTER_SELECT")),
++         ActionType.SELECT_ROLE to ActionPolicy(RiskLevel.NORMAL, setOf("CHARACTER_SELECT"), "character.role", setOf("CHARACTER_SELECT")),
+++        ActionType.ENTER_GAME to ActionPolicy(RiskLevel.NORMAL, setOf("CHARACTER_SELECT"), "character.enter", setOf("HOME", "LOADING")),
++         ActionType.OPEN_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.switch_region", setOf("DUNGEON_LIST")),
++-        ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("LOADING")),
++-        ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("DUNGEON_LIST")),
+++        ActionType.OPEN_AREA_MAP to ActionPolicy(RiskLevel.NORMAL, setOf("HOME"), "home.dungeon", setOf("AREA_MAP")),
+++        ActionType.OPEN_AREA_SWITCH to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_MAP"), "area.switch", setOf("AREA_PICKER")),
+++        ActionType.SELECT_AREA to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_PICKER"), "area.target", setOf("AREA_MAP")),
+++        ActionType.OPEN_DUNGEON_LIST to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_MAP"), "area.dungeon", setOf("DUNGEON_LIST")),
+++        ActionType.SELECT_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.candidate", setOf("DUNGEON_DETAIL")),
+++        ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("BATTLE", "LOADING")),
+++        ActionType.ENABLE_AUTO_BATTLE to ActionPolicy(RiskLevel.NORMAL, setOf("BATTLE"), "battle.auto", setOf("BATTLE")),
+++        ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("CHARACTER_SELECT", "HOME", "AREA_MAP")),
++         ActionType.PURCHASE to ActionPolicy(RiskLevel.FORBIDDEN_AUTO, emptySet(), "purchase.confirm", emptySet()),
++     )
++ 
++@@ -96,9 +109,9 @@ object ActionGuard {
++                 ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
++                 page.pageId,
++                 policy.expectedPagesAfter,
++-                5_000L,
+++                if (intent.type == ActionType.SELECT_AREA) 30_000L else 15_000L,
++             ),
++-            listOf("ALL_PRECONDITIONS_CONFIRMED", "DRY_RUN_ONLY"),
+++            listOf("ALL_PRECONDITIONS_CONFIRMED"),
++         )
++     }
++ 
++diff --git a/app/src/main/java/com/lidquan/yishigame/automation/DungeonRun.kt b/app/src/main/java/com/lidquan/yishigame/automation/DungeonRun.kt
++new file mode 100644
++index 0000000..78d3829
++--- /dev/null
+++++ b/app/src/main/java/com/lidquan/yishigame/automation/DungeonRun.kt
++@@ -0,0 +1,43 @@
+++package com.lidquan.yishigame.automation
+++
+++import com.lidquan.yishigame.vision.FreeAttemptState
+++import com.lidquan.yishigame.vision.ocr.CounterValue
+++
+++enum class DungeonBusinessState {
+++    HOME, AREA_MAP, AREA_PICKER, DUNGEON_LIST, DUNGEON_DETAIL, BATTLE, WAIT_HOME, SUCCESS, FAILED,
+++}
+++
+++enum class AutoBattleState { ON, OFF, MISSING, UNKNOWN }
+++
+++data class DungeonObservation(
+++    val page: String,
+++    val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
+++    val progress: CounterValue? = null,
+++    val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+ +)
+ +
+-+object ActionPolicyRegistry {
+-+    private val policies = mapOf(
+-+        ActionType.OPEN_SETTINGS to ActionPolicy(RiskLevel.SAFE, setOf("MAIN"), "main.settings", setOf("SETTINGS")),
+-+        ActionType.RETURN_CHARACTER_SELECT to ActionPolicy(RiskLevel.NORMAL, setOf("SETTINGS"), "settings.return_character", setOf("CHARACTER_SELECT")),
+-+        ActionType.SELECT_ROLE to ActionPolicy(RiskLevel.NORMAL, setOf("CHARACTER_SELECT"), "character.role", setOf("CHARACTER_SELECT")),
+-+        ActionType.OPEN_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.switch_region", setOf("DUNGEON_LIST")),
+-+        ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("LOADING")),
+-+        ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("DUNGEON_LIST")),
+-+        ActionType.PURCHASE to ActionPolicy(RiskLevel.FORBIDDEN_AUTO, emptySet(), "purchase.confirm", emptySet()),
+-+    )
+++data class DungeonRunStatus(
+++    val state: DungeonBusinessState = DungeonBusinessState.HOME,
+++    val lastProgress: CounterValue? = null,
+++    val errorCode: String? = null,
+++)
+ +
+-+    fun policy(type: ActionType): ActionPolicy? = policies[type]
+++object DungeonRunReducer {
+++    fun observe(status: DungeonRunStatus, observation: DungeonObservation): DungeonRunStatus = when {
+++        status.state == DungeonBusinessState.DUNGEON_DETAIL && observation.freeAttemptState != FreeAttemptState.AVAILABLE ->
+++            status.copy(state = DungeonBusinessState.FAILED, errorCode = "FREE_ATTEMPT_UNCONFIRMED")
+++        status.state == DungeonBusinessState.BATTLE && observation.autoBattleState == AutoBattleState.MISSING ->
+++            status.copy(state = DungeonBusinessState.FAILED, errorCode = "MANUAL_BATTLE_REQUIRED")
+++        status.state == DungeonBusinessState.BATTLE && observation.progress != null -> {
+++            val progress = observation.progress
+++            if (progress.current == progress.total) status.copy(state = DungeonBusinessState.WAIT_HOME, lastProgress = progress)
+++            else status.copy(lastProgress = progress)
+++        }
+++        status.state in setOf(DungeonBusinessState.BATTLE, DungeonBusinessState.WAIT_HOME) && observation.page == "HOME" -> {
+++            val complete = status.lastProgress?.let { it.current == it.total } == true
+++            if (complete) status.copy(state = DungeonBusinessState.SUCCESS)
+++            else status.copy(state = DungeonBusinessState.FAILED, errorCode = "DUNGEON_INCOMPLETE")
+++        }
+++        else -> status
+++    }
+ +}
++diff --git a/app/src/main/java/com/lidquan/yishigame/data/Daos.kt b/app/src/main/java/com/lidquan/yishigame/data/Daos.kt
++index a5ea8a3..536a5b2 100644
++--- a/app/src/main/java/com/lidquan/yishigame/data/Daos.kt
+++++ b/app/src/main/java/com/lidquan/yishigame/data/Daos.kt
++@@ -26,6 +26,7 @@ interface DungeonDao {
++ 
++ @Dao
++ interface DailyExecutionDao {
+++    @Upsert suspend fun upsert(execution: DailyExecutionEntity)
++     @Insert(onConflict = OnConflictStrategy.IGNORE)
++     suspend fun insertIfAbsent(execution: DailyExecutionEntity): Long
++     @Query("SELECT * FROM daily_executions WHERE gameDayKey = :gameDayKey ORDER BY startedAt")
++diff --git a/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt b/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt
++new file mode 100644
++index 0000000..8ebe565
++--- /dev/null
+++++ b/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt
++@@ -0,0 +1,38 @@
+++package com.lidquan.yishigame.diagnostics
+ +
+-+data class ActionIntent(val type: ActionType)
+- data class ActionPlan(
+-     val intent: ActionIntent,
+-     val targetRect: WindowBounds,
+-@@ -29,14 +50,12 @@ data class ActionContext(
+-     val targetVisible: Boolean,
+-     val targetActive: Boolean,
+-     val windowGate: WindowGate,
+--    val viewportValid: Boolean,
+-+    val contentViewport: WindowBounds?,
+-     val stablePage: StablePage?,
+-     val currentViewportVersion: Long,
+-     val now: Long,
+-     val maxStablePageAgeMs: Long = 2_000L,
+--    val allowedPages: Set<String>,
+--    val targetRect: WindowBounds?,
+--    val expectedPagesAfter: Set<String>,
+-+    val actionTargets: Map<String, WindowBounds>,
+-     val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
+-     val dailyAlreadySuccess: Boolean = false,
+-     val purchaseSignalPresent: Boolean = false,
+-@@ -50,33 +69,39 @@ sealed interface GuardDecision {
+- object ActionGuard {
+-     fun plan(intent: ActionIntent, context: ActionContext): GuardDecision {
+-         fun deny(reason: GuardDenyReason) = GuardDecision.Deny(reason, listOf(reason.name))
+--        if (intent.riskLevel == RiskLevel.FORBIDDEN_AUTO || intent.type == ActionType.PURCHASE) return deny(GuardDenyReason.FORBIDDEN_AUTO)
+-+        val policy = ActionPolicyRegistry.policy(intent.type) ?: return deny(GuardDenyReason.POLICY_MISSING)
+-+        if (policy.riskLevel == RiskLevel.FORBIDDEN_AUTO) return deny(GuardDenyReason.FORBIDDEN_AUTO)
+-         if (context.automationState != AutomationState.RUNNING_PLACEHOLDER) return deny(GuardDenyReason.AUTOMATION_NOT_RUNNING)
+-         if (!context.accessibilityConnected) return deny(GuardDenyReason.ACCESSIBILITY_UNAVAILABLE)
+-         if (context.captureState !is ScreenCaptureState.Active) return deny(GuardDenyReason.CAPTURE_INACTIVE)
+-         if (!context.targetVisible) return deny(GuardDenyReason.TARGET_NOT_VISIBLE)
+-         if (!context.targetActive) return deny(GuardDenyReason.TARGET_NOT_ACTIVE)
+-         if (context.windowGate != WindowGate.MATCHED) return deny(GuardDenyReason.WINDOW_NOT_MATCHED)
+--        if (!context.viewportValid) return deny(GuardDenyReason.VIEWPORT_INVALID)
+-+        val viewport = context.contentViewport?.takeIf { it.isValid } ?: return deny(GuardDenyReason.VIEWPORT_INVALID)
+-         val page = context.stablePage ?: return deny(GuardDenyReason.PAGE_NOT_STABLE)
+-         if (page.viewportVersion != context.currentViewportVersion) return deny(GuardDenyReason.PAGE_VIEWPORT_MISMATCH)
+-         if (context.now < page.observedAt || context.now - page.observedAt > context.maxStablePageAgeMs) return deny(GuardDenyReason.PAGE_STALE)
+--        if (page.pageId !in context.allowedPages) return deny(GuardDenyReason.PAGE_NOT_ALLOWED)
+--        val rect = context.targetRect ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
+--        if (context.expectedPagesAfter.isEmpty()) return deny(GuardDenyReason.POSTCONDITION_MISSING)
+--        if (intent.riskLevel == RiskLevel.SENSITIVE) {
+-+        if (page.pageId !in policy.allowedPages) return deny(GuardDenyReason.PAGE_NOT_ALLOWED)
+-+        val rect = context.actionTargets[policy.requiredTargetId] ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
+-+        if (!viewport.contains(rect)) return deny(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT)
+-+        if (policy.riskLevel == RiskLevel.SENSITIVE) {
+-             if (context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
+-             if (context.dailyAlreadySuccess) return deny(GuardDenyReason.DAILY_ALREADY_SUCCESS)
+-             if (context.purchaseSignalPresent) return deny(GuardDenyReason.PURCHASE_SIGNAL_PRESENT)
+-         }
+--        val plan = ActionPlan(
+--            intent,
+--            rect,
+--            ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
+--            page.pageId,
+--            context.expectedPagesAfter,
+--            5_000L,
+-+        return GuardDecision.AllowDryRun(
+-+            ActionPlan(
+-+                intent,
+-+                rect,
+-+                ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
+-+                page.pageId,
+-+                policy.expectedPagesAfter,
+-+                5_000L,
+-+            ),
+-+            listOf("ALL_PRECONDITIONS_CONFIRMED", "DRY_RUN_ONLY"),
+-         )
+--        return GuardDecision.AllowDryRun(plan, listOf("ALL_PRECONDITIONS_CONFIRMED", "DRY_RUN_ONLY"))
+-     }
+++import android.content.Context
+++import org.json.JSONObject
+++import java.io.File
+++import java.util.UUID
+ +
+-+    private fun WindowBounds.contains(other: WindowBounds): Boolean =
+-+        other.isValid && other.left >= left && other.top >= top && other.right <= right && other.bottom <= bottom
+- }
+++class RunLogger(context: Context, val sessionId: String = UUID.randomUUID().toString()) {
+++    private val file = File(context.filesDir, "run-logs/$sessionId.jsonl").also { it.parentFile?.mkdirs() }
+++    private var lastStateFingerprint: String? = null
+++
+++    @Synchronized
+++    fun start(values: Map<String, Any?>) = append("START", values)
+++
+++    @Synchronized
+++    fun state(values: Map<String, Any?>) {
+++        val fingerprint = values.toSortedMap().toString()
+++        if (fingerprint == lastStateFingerprint) return
+++        lastStateFingerprint = fingerprint
+++        append("STATE", values)
+++    }
+++
+++    @Synchronized
+++    fun action(values: Map<String, Any?>) = append("ACTION", values)
+++
+++    @Synchronized
+++    fun finish(result: String, errorCode: String? = null) =
+++        append("RESULT", mapOf("result" to result, "errorCode" to errorCode))
+++
+++    private fun append(kind: String, values: Map<String, Any?>) {
+++        val json = JSONObject()
+++            .put("timestamp", System.currentTimeMillis())
+++            .put("sessionId", sessionId)
+++            .put("kind", kind)
+++        values.forEach { (key, value) -> json.put(key, value ?: JSONObject.NULL) }
+++        file.appendText(json.toString() + "\n")
+++    }
+++}
+ diff --git a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+-index 9ecd88d..fefd660 100644
++index fefd660..546f62f 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+-@@ -117,7 +117,7 @@ fun AssistantApp(
++@@ -114,6 +114,7 @@ fun AssistantApp(
++                     StatusRow("OCR / Page", "${state.visionMetrics.ocrDurationMs} / ${state.visionMetrics.pageDetectorDurationMs} ms")
++                     StatusRow("Detection", detectionLabel(state.visionMetrics.pageDetection))
++                     StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
+++                    StatusRow("Evidence", state.visionMetrics.evidenceIds.joinToString().ifEmpty { "无" })
+                      StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
+                      StatusRow("Action Guard", guardLabel(state.dryRunDecision))
+                      Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
+--                        Text("评估 DUNGEON_LIST 锚点 Dry-Run")
+-+                        Text("评估 DUNGEON_LIST 动作目标 Dry-Run")
+-                     }
+-                     Text("当前没有已确认的公开/私有页面模板时，结果必须保持 UNKNOWN。")
+-                 }
+-@@ -213,7 +213,9 @@ private fun detectionLabel(detection: PageDetection): String = when (detection)
+-
+- private fun guardLabel(decision: GuardDecision?): String = when (decision) {
+-     null -> "未评估"
+--    is GuardDecision.AllowDryRun -> "ALLOW_DRY_RUN（不会执行）"
+-+    is GuardDecision.AllowDryRun -> decision.plan.let {
+-+        "ALLOW_DRY_RUN（不会执行）· rect=${it.targetRect.left},${it.targetRect.top},${it.targetRect.right},${it.targetRect.bottom} · point=${it.tapPoint.x},${it.tapPoint.y}"
+-+    }
+-     is GuardDecision.Deny -> "DENY · ${decision.reason}"
++@@ -131,7 +132,7 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
++     Card(modifier = modifier) {
++         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
++             Text("异世界勇者自动化助手", style = MaterialTheme.typography.headlineMedium)
++-            Text("M1 视觉基础设施验证版，只识别与 Dry-Run，不执行游戏输入。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+++            Text("REQ-0006 单角色单副本受控验证版。所有输入必须通过 Action Guard。", color = MaterialTheme.colorScheme.onSurfaceVariant)
++             StatusRow("当前状态", state.automationState.name)
++             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
++             StatusRow("屏幕采集", captureLabel(state.captureState))
++@@ -146,6 +147,8 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
++             )
++             StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowGate}" } ?: state.windowGate.name)
++             StatusRow("设备摘要", state.deviceSummary)
+++            StatusRow("REQ-0006", state.req0006Error?.let { "${state.req0006State} · $it" } ?: state.req0006State)
+++            state.req0006SessionId?.let { StatusRow("Session", it) }
++         }
++     }
+  }
+-
++@@ -179,10 +182,10 @@ private fun Controls(
++             ) { Text("请求并验证屏幕采集") }
++             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
++             Button(
++-                onClick = viewModel::beginPlaceholder,
+++                onClick = viewModel::beginReq0006,
++                 enabled = state.canArmPlaceholder,
++                 modifier = Modifier.fillMaxWidth(),
++-            ) { Text("准备启动（M0 占位）") }
+++            ) { Text("开始 REQ-0006 受控运行") }
++             if (state.automationState == AutomationState.WAIT_TARGET_ACTIVE) {
++                 Text("握手第 2 阶段：请切回游戏窗口；只有窗口、焦点和采集状态均通过检查后才会继续。", color = MaterialTheme.colorScheme.primary)
++             }
++diff --git a/app/src/main/java/com/lidquan/yishigame/viewport/ContentViewportDetector.kt b/app/src/main/java/com/lidquan/yishigame/viewport/ContentViewportDetector.kt
++new file mode 100644
++index 0000000..7293b9e
++--- /dev/null
+++++ b/app/src/main/java/com/lidquan/yishigame/viewport/ContentViewportDetector.kt
++@@ -0,0 +1,38 @@
+++package com.lidquan.yishigame.viewport
+++
+++import com.lidquan.yishigame.automation.WindowBounds
+++import com.lidquan.yishigame.capture.ScreenFrameSnapshot
+++
+++/** Detects the rendered game surface and excludes black letterbox bars. */
+++object ContentViewportDetector {
+++    fun detect(frame: ScreenFrameSnapshot, window: WindowBounds): WindowBounds? {
+++        if (!window.isValid || window.right > frame.width || window.bottom > frame.height) return null
+++        val sampleRows = intArrayOf(0, window.height / 4, window.height / 2, window.height * 3 / 4, window.height - 1)
+++            .map { window.top + it.coerceIn(0, window.height - 1) }
+++        val activeColumns = BooleanArray(window.width)
+++        for (localX in activeColumns.indices step sampleStep) {
+++            val x = window.left + localX
+++            activeColumns[localX] = sampleRows.any { y -> !isNearBlack(frame, x, y) }
+++        }
+++        val first = activeColumns.indices.firstOrNull { activeColumns[it] } ?: return null
+++        val last = activeColumns.indices.lastOrNull { activeColumns[it] } ?: return null
+++        val left = window.left + (first / sampleStep) * sampleStep
+++        val right = (window.left + ((last / sampleStep) + 1) * sampleStep).coerceAtMost(window.right)
+++        return WindowBounds(left, window.top, right, window.bottom).takeIf {
+++            it.isValid && it.width >= minimumWidth && it.height >= minimumHeight
+++        }
+++    }
+++
+++    private fun isNearBlack(frame: ScreenFrameSnapshot, x: Int, y: Int): Boolean {
+++        val offset = y * frame.rowStride + x * frame.pixelStride
+++        if (offset < 0 || offset + 2 >= frame.rgba.size) return true
+++        return (frame.rgba[offset].toInt() and 0xff) <= blackThreshold &&
+++            (frame.rgba[offset + 1].toInt() and 0xff) <= blackThreshold &&
+++            (frame.rgba[offset + 2].toInt() and 0xff) <= blackThreshold
+++    }
+++
+++    private const val sampleStep = 4
+++    private const val blackThreshold = 12
+++    private const val minimumWidth = 320
+++    private const val minimumHeight = 480
+++}
+ diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
+-index fddbc80..72c03fa 100644
++index 72c03fa..5427ce8 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
+-@@ -17,9 +17,10 @@ data class OcrSignalDefinition(
+-     val id: String,
+-     val roi: NormalizedRect,
+-     val expectedText: String,
+-+    val actionTargetId: String? = null,
++@@ -6,6 +6,9 @@ import com.lidquan.yishigame.viewport.NormalizedRect
++ import com.lidquan.yishigame.viewport.ViewportMapper
++ import com.lidquan.yishigame.vision.ocr.OcrEngine
++ import com.lidquan.yishigame.vision.ocr.freeAttemptState
+++import com.lidquan.yishigame.vision.ocr.parseCounter
+++import com.lidquan.yishigame.vision.ocr.CounterValue
+++import com.lidquan.yishigame.automation.AutoBattleState
++ import com.lidquan.yishigame.vision.page.PageDefinition
++ import com.lidquan.yishigame.vision.page.PageDetector
++ import com.lidquan.yishigame.vision.page.SignalRule
++@@ -20,7 +23,7 @@ data class OcrSignalDefinition(
++     val actionTargetId: String? = null,
+  )
+-
+--enum class SemanticOcrSignalType { FREE_ATTEMPT }
+-+enum class SemanticOcrSignalType { FREE_ATTEMPT, GENERIC }
+-
++ 
++-enum class SemanticOcrSignalType { FREE_ATTEMPT, GENERIC }
+++enum class SemanticOcrSignalType { FREE_ATTEMPT, PROGRESS, GENERIC }
++ 
+  data class SemanticOcrSignalDefinition(
+      val id: String,
+-@@ -52,17 +53,21 @@ class ConfiguredVisionEngine(
+-     suspend fun analyze(frame: ScreenFrameSnapshot): VisionAnalysis {
+-         val currentViewport = viewport()?.takeIf { it.isValid && it.right <= frame.width && it.bottom <= frame.height }
++@@ -28,6 +31,14 @@ data class SemanticOcrSignalDefinition(
++     val type: SemanticOcrSignalType,
++ )
++ 
+++data class RegexOcrSignalDefinition(
+++    val id: String,
+++    val roi: NormalizedRect,
+++    val pattern: Regex,
+++    val actionTargetId: String? = null,
+++    val actionTargetRoi: NormalizedRect? = null,
+++)
+++
++ data class TemplateSignalDefinition(
++     val definition: TemplateDefinition,
++     val template: RgbaTemplate,
++@@ -40,6 +51,7 @@ data class VisionConfiguration(
++     val ocrSignals: List<OcrSignalDefinition>,
++     val pages: List<PageDefinition>,
++     val semanticOcrSignals: List<SemanticOcrSignalDefinition> = emptyList(),
+++    val regexOcrSignals: List<RegexOcrSignalDefinition> = emptyList(),
++     val templateSignals: List<TemplateSignalDefinition> = emptyList(),
++ )
++ 
++@@ -55,14 +67,25 @@ class ConfiguredVisionEngine(
+              ?: return VisionAnalysis(PageDetection.Unknown(emptyList()), FreeAttemptState.UNKNOWN)
+--        val rawOcr = mutableListOf<OcrEvidence>()
+-+        val freeAttemptOcr = mutableListOf<OcrEvidence>()
+-+        val actionTargets = mutableListOf<ActionTargetEvidence>()
++         val freeAttemptOcr = mutableListOf<OcrEvidence>()
++         val actionTargets = mutableListOf<ActionTargetEvidence>()
+++        var progress: CounterValue? = null
+++        var currentMap: String? = null
+++        var currentDungeon: String? = null
+          var ocrNanos = 0L
+++        val ocrStarted = System.nanoTime()
+++        val allOcrLines = runCatching { ocr.recognize(frame, currentViewport) }.getOrElse { emptyList() }
+++        ocrNanos += System.nanoTime() - ocrStarted
+++        fun linesIn(roi: WindowBounds) = allOcrLines.filter { line ->
+++            val centerX = (line.rect.left + line.rect.right) / 2
+++            val centerY = (line.rect.top + line.rect.bottom) / 2
+++            centerX in roi.left..roi.right && centerY in roi.top..roi.bottom
+++        }
+          val evidence = configuration.ocrSignals.mapNotNull { signal ->
+              val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
+-             val ocrStarted = System.nanoTime()
+-             val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+-             ocrNanos += System.nanoTime() - ocrStarted
+--            rawOcr += lines
++-            val ocrStarted = System.nanoTime()
++-            val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
++-            ocrNanos += System.nanoTime() - ocrStarted
+++            val lines = linesIn(roi)
+              val normalized = lines.joinToString(separator = "") { it.normalizedText }
+              if (signal.expectedText in normalized) {
+--                OcrEvidence(signal.id, normalized, normalized, 0.9f, roi)
+-+                val matchingLine = lines.firstOrNull { signal.expectedText in it.normalizedText }
+-+                if (matchingLine != null && signal.actionTargetId != null) {
+-+                    actionTargets += ActionTargetEvidence(signal.actionTargetId, matchingLine.confidence, matchingLine.rect)
+-+                }
+-+                OcrEvidence(signal.id, normalized, normalized, 0.9f, matchingLine?.rect ?: roi)
+-             } else {
+-                 null
+-             }
+-@@ -70,7 +75,8 @@ class ConfiguredVisionEngine(
+++                if (signal.id.startsWith("map.name.")) currentMap = signal.expectedText
+++                if (signal.id.startsWith("detail.name.")) currentDungeon = signal.expectedText
++                 val matchingLine = lines.firstOrNull { signal.expectedText in it.normalizedText }
++                 if (matchingLine != null && signal.actionTargetId != null) {
++                     actionTargets += ActionTargetEvidence(signal.actionTargetId, matchingLine.confidence, matchingLine.rect)
++@@ -74,10 +97,26 @@ class ConfiguredVisionEngine(
++         }.toMutableList<VisionEvidence>()
+          configuration.semanticOcrSignals.forEach { signal ->
+              val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
+-             val started = System.nanoTime()
+--            rawOcr += runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+-+            val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+-+            if (signal.type == SemanticOcrSignalType.FREE_ATTEMPT) freeAttemptOcr += lines
+-             ocrNanos += System.nanoTime() - started
++-            val started = System.nanoTime()
++-            val lines = runCatching { ocr.recognize(frame, roi) }.getOrElse { emptyList() }
+++            val lines = linesIn(roi)
++             if (signal.type == SemanticOcrSignalType.FREE_ATTEMPT) freeAttemptOcr += lines
++-            ocrNanos += System.nanoTime() - started
+++            if (signal.type == SemanticOcrSignalType.PROGRESS) {
+++                progress = lines.asSequence().mapNotNull { parseCounter(it.normalizedText) }.firstOrNull()
+++            }
+++        }
+++        configuration.regexOcrSignals.forEach { signal ->
+++            val roi = ViewportMapper.toScreen(signal.roi, currentViewport)
+++            val lines = linesIn(roi)
+++            val match = lines.firstOrNull { signal.pattern.containsMatchIn(it.normalizedText) }
+++            if (match != null) {
+++                evidence += OcrEvidence(signal.id, match.text, match.normalizedText, match.confidence, match.rect)
+++                if (signal.actionTargetId != null) {
+++                    actionTargets += ActionTargetEvidence(
+++                        signal.actionTargetId,
+++                        match.confidence,
+++                        signal.actionTargetRoi?.let { ViewportMapper.toScreen(it, currentViewport) } ?: match.rect,
+++                    )
+++                }
+++            }
+          }
+          var templateNanos = 0L
+-@@ -79,7 +85,7 @@ class ConfiguredVisionEngine(
+-             TemplateMatcher.match(signal.definition, frame, currentViewport, signal.template)?.let(evidence::add)
++         configuration.templateSignals.forEach { signal ->
++@@ -86,6 +125,12 @@ class ConfiguredVisionEngine(
+              templateNanos += System.nanoTime() - started
+          }
+--        val freeState = freeAttemptState(rawOcr)
+-+        val freeState = freeAttemptState(freeAttemptOcr)
++         val freeState = freeAttemptState(freeAttemptOcr)
+++        // The native auto-battle control sits on the mid-screen divider, not in the top progress bar.
+++        val autoRect = ViewportMapper.toScreen(NormalizedRect(0.47f, 0.30f, 0.54f, 0.38f), currentViewport)
+++        val autoState = detectAutoBattle(frame, autoRect)
+++        if (autoState == AutoBattleState.ON || autoState == AutoBattleState.OFF) {
+++            actionTargets += ActionTargetEvidence("battle.auto", 0.85f, autoRect)
+++        }
+          val detectorStarted = System.nanoTime()
+          val detection = detector.detect(evidence)
+          val detectorMs = (System.nanoTime() - detectorStarted) / 1_000_000L
+-@@ -89,6 +95,7 @@ class ConfiguredVisionEngine(
+-             templateDurationMs = templateNanos / 1_000_000L,
++@@ -96,6 +141,11 @@ class ConfiguredVisionEngine(
+              ocrDurationMs = ocrNanos / 1_000_000L,
+              pageDetectorDurationMs = detectorMs,
+-+            actionTargets = actionTargets,
++             actionTargets = actionTargets,
+++            progress = progress,
+++            autoBattleState = autoState,
+++            currentMap = currentMap,
+++            currentDungeon = currentDungeon,
+++            evidenceIds = evidence.map { it.id },
+          )
+      }
+-
+-@@ -104,7 +111,7 @@ fun initialVisionConfiguration(): VisionConfiguration {
++ 
++@@ -104,19 +154,56 @@ class ConfiguredVisionEngine(
++     }
++ }
++ 
+++private fun detectAutoBattle(frame: ScreenFrameSnapshot, rect: WindowBounds): AutoBattleState {
+++    var brightNeutral = 0
+++    for (y in rect.top until rect.bottom step 3) for (x in rect.left until rect.right step 3) {
+++        val offset = y * frame.rowStride + x * frame.pixelStride
+++        if (offset + 2 >= frame.rgba.size) continue
+++        val r = frame.rgba[offset].toInt() and 0xff
+++        val g = frame.rgba[offset + 1].toInt() and 0xff
+++        val b = frame.rgba[offset + 2].toInt() and 0xff
+++        if (r > 175 && g > 165 && b > 120 && maxOf(r, g, b) - minOf(r, g, b) < 70) brightNeutral++
+++    }
+++    return when {
+++        // A bright control can be observed in the provided ON frame. OFF and absent
+++        // are not safely separable from background without another live sample.
+++        brightNeutral >= 20 -> AutoBattleState.ON
+++        else -> AutoBattleState.UNKNOWN
+++    }
+++}
+++
++ fun initialVisionConfiguration(): VisionConfiguration {
++     val signals = listOf(
++         OcrSignalDefinition("settings.title", NormalizedRect(0.25f, 0.05f, 0.75f, 0.15f), "设置"),
++         OcrSignalDefinition("settings.anchor", NormalizedRect(0.15f, 0.47f, 0.85f, 0.56f), "自动回收"),
+          OcrSignalDefinition("character.title", NormalizedRect(0.27f, 0.13f, 0.65f, 0.22f), "选择角色"),
+-         OcrSignalDefinition("character.anchor", NormalizedRect(0.28f, 0.42f, 0.62f, 0.52f), "进入游戏"),
+-         OcrSignalDefinition("dungeon.title", NormalizedRect(0.23f, 0.29f, 0.78f, 0.38f), "地下城"),
+--        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域"),
+-+        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域", actionTargetId = "dungeon.switch_region"),
++-        OcrSignalDefinition("character.anchor", NormalizedRect(0.28f, 0.42f, 0.62f, 0.52f), "进入游戏"),
++-        OcrSignalDefinition("dungeon.title", NormalizedRect(0.23f, 0.29f, 0.78f, 0.38f), "地下城"),
++-        OcrSignalDefinition("dungeon.anchor", NormalizedRect(0.32f, 0.64f, 0.68f, 0.73f), "切换区域", actionTargetId = "dungeon.switch_region"),
+++        OcrSignalDefinition("character.anchor", NormalizedRect(0.30f, 0.25f, 0.70f, 0.36f), "进入游戏", actionTargetId = "character.enter"),
+++        OcrSignalDefinition("dialog.anchor", NormalizedRect(0.25f, 0.45f, 0.75f, 0.70f), "确定", actionTargetId = "dialog.close"),
+++        OcrSignalDefinition("home.title", NormalizedRect(0.00f, 0.05f, 0.42f, 0.28f), "领取任务"),
+++        OcrSignalDefinition("home.anchor", NormalizedRect(0.62f, 0.02f, 1.00f, 0.28f), "设置"),
+++        OcrSignalDefinition("area.title", NormalizedRect(0.00f, 0.78f, 0.55f, 1.00f), "切换区域", actionTargetId = "area.switch"),
+++        OcrSignalDefinition("area.anchor", NormalizedRect(0.55f, 0.70f, 1.00f, 1.00f), "地下城", actionTargetId = "area.dungeon"),
+++        OcrSignalDefinition("area_picker.title", NormalizedRect(0.25f, 0.20f, 0.78f, 0.82f), "亡灵之地"),
+++        OcrSignalDefinition("area_picker.anchor", NormalizedRect(0.25f, 0.20f, 0.78f, 0.82f), "亡灵之地", actionTargetId = "area.target"),
+++        OcrSignalDefinition("map.name.undead", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "亡灵之地"),
+++        OcrSignalDefinition("map.name.east", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "东部大陆"),
+++        OcrSignalDefinition("map.name.void", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "虚空领域"),
+++        OcrSignalDefinition("map.name.frozen", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "冰封大陆"),
+++        OcrSignalDefinition("map.name.element", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "元素之地"),
+++        OcrSignalDefinition("map.name.mist", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "迷雾大陆"),
+++        OcrSignalDefinition("map.name.shadow", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "暗影大陆"),
+++        OcrSignalDefinition("map.name.legion", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "军团领域"),
+++        OcrSignalDefinition("map.name.storm", NormalizedRect(0.25f, 0.08f, 0.75f, 0.25f), "风暴群岛"),
+++        OcrSignalDefinition("dungeon.title", NormalizedRect(0.15f, 0.00f, 0.85f, 0.30f), "地下城"),
+++        OcrSignalDefinition("detail.title", NormalizedRect(0.15f, 0.35f, 0.85f, 0.80f), "免费"),
+++        OcrSignalDefinition("detail.anchor", NormalizedRect(0.20f, 0.62f, 0.80f, 0.92f), "前往", actionTargetId = "dungeon.start_free"),
+++        OcrSignalDefinition("battle.anchor", NormalizedRect(0.50f, 0.00f, 1.00f, 0.25f), "设置"),
+      )
+-     fun page(id: String, prefix: String) = PageDefinition(
++-    fun page(id: String, prefix: String) = PageDefinition(
+++    fun page(id: String, prefix: String, negative: List<SignalRule> = emptyList()) = PageDefinition(
+          pageId = id,
++         version = 1,
++         required = listOf(SignalRule("$prefix.title", 0.8f), SignalRule("$prefix.anchor", 0.8f)),
+++        negative = negative,
++         threshold = 0.85f,
++         minimumMargin = 0.1f,
++     )
++@@ -125,6 +212,32 @@ fun initialVisionConfiguration(): VisionConfiguration {
++         templateSetVersion = "m1-local-private-v1",
++         pageDefinitionVersion = "m1-pages-v1",
++         ocrSignals = signals,
++-        pages = listOf(page("SETTINGS", "settings"), page("CHARACTER_SELECT", "character"), page("DUNGEON_LIST", "dungeon")),
+++        pages = listOf(
+++            page("SETTINGS", "settings"),
+++            page("CHARACTER_SELECT", "character"),
+++            page("SAFE_DIALOG", "dialog"),
+++            page("HOME", "home"),
+++            page("AREA_MAP", "area", negative = listOf(SignalRule("area_picker.anchor", 0.8f))),
+++            page("AREA_PICKER", "area_picker"),
+++            PageDefinition("DUNGEON_LIST", 1,
+++                required = listOf(SignalRule("dungeon.title", 0.8f), SignalRule("dungeon.badge.first", 0.8f)),
+++                threshold = 0.85f, minimumMargin = 0.1f),
+++            page("DUNGEON_DETAIL", "detail"),
+++            page("BATTLE", "battle"),
+++        ),
+++        semanticOcrSignals = listOf(
+++            SemanticOcrSignalDefinition("detail.free", NormalizedRect(0.20f, 0.52f, 0.80f, 0.85f), SemanticOcrSignalType.FREE_ATTEMPT),
+++            SemanticOcrSignalDefinition("battle.progress", NormalizedRect(0.25f, 0.00f, 0.75f, 0.20f), SemanticOcrSignalType.PROGRESS),
+++        ),
+++        regexOcrSignals = listOf(
+++            RegexOcrSignalDefinition("dialog.title", NormalizedRect(0.20f, 0.25f, 0.80f, 0.60f), Regex("更新|网络错误")),
+++            RegexOcrSignalDefinition("home.dungeon", NormalizedRect(0.20f, 0.00f, 0.80f, 0.16f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), "home.dungeon"),
+++            RegexOcrSignalDefinition(
+++                "dungeon.badge.first", NormalizedRect(0.34f, 0.30f, 0.42f, 0.38f),
+++                Regex("^[1-9]$"), "dungeon.candidate",
+++                NormalizedRect(0.23f, 0.32f, 0.39f, 0.40f),
+++            ),
+++            RegexOcrSignalDefinition("battle.title", NormalizedRect(0.20f, 0.00f, 0.80f, 0.18f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])")),
+++        ),
++     )
++ }
+ diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+-index 7693893..2cc99ad 100644
++index 2cc99ad..cf1be08 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
+-@@ -24,6 +24,12 @@ data class OcrEvidence(
+-     override val confidence: Float get() = reportedConfidence ?: 0.5f
+- }
+-
+-+data class ActionTargetEvidence(
+-+    val id: String,
+-+    val confidence: Float,
+-+    val rect: WindowBounds,
+-+)
+-+
+- enum class FreeAttemptState { AVAILABLE, EXHAUSTED, UNKNOWN }
+-
+- data class PageCandidate(val pageId: String, val confidence: Float, val evidences: List<VisionEvidence>)
+-@@ -53,4 +59,5 @@ data class VisionMetrics(
+-     val pageDetection: PageDetection = PageDetection.Unknown(emptyList()),
++@@ -1,6 +1,8 @@
++ package com.lidquan.yishigame.vision
++ 
++ import com.lidquan.yishigame.automation.WindowBounds
+++import com.lidquan.yishigame.automation.AutoBattleState
+++import com.lidquan.yishigame.vision.ocr.CounterValue
++ 
++ sealed interface VisionEvidence {
++     val id: String
++@@ -60,4 +62,9 @@ data class VisionMetrics(
+      val stablePage: StablePage? = null,
+      val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
+-+    val actionTargets: Map<String, WindowBounds> = emptyMap(),
++     val actionTargets: Map<String, WindowBounds> = emptyMap(),
+++    val progress: CounterValue? = null,
+++    val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+++    val currentMap: String? = null,
+++    val currentDungeon: String? = null,
+++    val evidenceIds: List<String> = emptyList(),
+  )
+ diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
+-index f25be0f..fa3bd9d 100644
++index fa3bd9d..35d7168 100644
+ --- a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
+ +++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
+-@@ -20,6 +20,7 @@ data class VisionAnalysis(
+-     val templateDurationMs: Long = 0,
++@@ -3,6 +3,8 @@ package com.lidquan.yishigame.vision
++ import com.lidquan.yishigame.capture.FrameStore
++ import com.lidquan.yishigame.capture.ScreenFrameSnapshot
++ import com.lidquan.yishigame.vision.page.StablePageTracker
+++import com.lidquan.yishigame.automation.AutoBattleState
+++import com.lidquan.yishigame.vision.ocr.CounterValue
++ import kotlinx.coroutines.CoroutineScope
++ import kotlinx.coroutines.Dispatchers
++ import kotlinx.coroutines.Job
++@@ -21,6 +23,11 @@ data class VisionAnalysis(
+      val ocrDurationMs: Long = 0,
+      val pageDetectorDurationMs: Long = 0,
+-+    val actionTargets: List<ActionTargetEvidence> = emptyList(),
++     val actionTargets: List<ActionTargetEvidence> = emptyList(),
+++    val progress: CounterValue? = null,
+++    val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+++    val currentMap: String? = null,
+++    val currentDungeon: String? = null,
+++    val evidenceIds: List<String> = emptyList(),
+  )
+-
++ 
+  class VisionWorker(
+-@@ -65,6 +66,7 @@ class VisionWorker(
+-                         pageDetection = result.detection,
++@@ -67,6 +74,11 @@ class VisionWorker(
+                          stablePage = stable,
+                          freeAttemptState = result.freeAttemptState,
+-+                        actionTargets = result.actionTargets.associate { it.id to it.rect },
++                         actionTargets = result.actionTargets.associate { it.id to it.rect },
+++                        progress = result.progress,
+++                        autoBattleState = result.autoBattleState,
+++                        currentMap = result.currentMap,
+++                        currentDungeon = result.currentDungeon,
+++                        evidenceIds = result.evidenceIds,
+                      )
+                      lastFrameId = frame.frameId
+                  }
+-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
+-index 14d7497..a3106a5 100644
+---- a/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
+-+++ b/app/src/main/java/com/lidquan/yishigame/vision/template/TemplateMatcher.kt
+-@@ -12,7 +12,6 @@ data class TemplateDefinition(
+-     val pageId: String,
+-     val roi: NormalizedRect,
+-     val threshold: Float,
+--    val negative: Boolean = false,
+-     val scalePolicy: ScalePolicy = ScalePolicy.FIXED,
+- )
+-
++diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt
++index 725acc3..28cdf53 100644
++--- a/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt
+++++ b/app/src/main/java/com/lidquan/yishigame/vision/ocr/OcrEngine.kt
++@@ -12,10 +12,23 @@ fun normalizeOcrText(value: String): String = value
++     .replace(Regex("\\s+"), "")
++ 
++ fun freeAttemptState(evidences: List<OcrEvidence>): FreeAttemptState = when {
++-    evidences.any { Regex("免费\\(1/1\\)").containsMatchIn(it.normalizedText) } -> FreeAttemptState.AVAILABLE
+++    evidences.mapNotNull { parseCounter(it.normalizedText, "免费") }.any { it.current > 0 } -> FreeAttemptState.AVAILABLE
+++    evidences.mapNotNull { parseCounter(it.normalizedText, "免费") }.any { it.current == 0 } -> FreeAttemptState.EXHAUSTED
++     else -> FreeAttemptState.UNKNOWN
++ }
++ 
+++data class CounterValue(val current: Int, val total: Int)
+++
+++fun parseCounter(raw: String, prefix: String? = null): CounterValue? {
+++    val normalized = normalizeOcrText(raw)
+++    val pattern = if (prefix == null) Regex("(?:^|[^0-9])(\\d{1,3})/(\\d{1,3})(?:$|[^0-9])")
+++    else Regex("${Regex.escape(prefix)}\\(?(\\d{1,3})/(\\d{1,3})\\)?")
+++    val match = pattern.find(normalized) ?: return null
+++    val current = match.groupValues[1].toIntOrNull() ?: return null
+++    val total = match.groupValues[2].toIntOrNull() ?: return null
+++    return CounterValue(current, total).takeIf { total > 0 && current in 0..total }
+++}
+++
++ fun interface OcrEngine {
++     suspend fun recognize(frame: ScreenFrameSnapshot, roi: WindowBounds): List<OcrEvidence>
++ }
++diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt
++new file mode 100644
++index 0000000..4341ca7
++--- /dev/null
+++++ b/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt
++@@ -0,0 +1,42 @@
+++package com.lidquan.yishigame.action
+++
+++import com.lidquan.yishigame.accessibility.AccessibilityController
+++import com.lidquan.yishigame.accessibility.AccessibleWindow
+++import com.lidquan.yishigame.automation.AutomationState
+++import com.lidquan.yishigame.automation.WindowBounds
+++import com.lidquan.yishigame.automation.WindowGate
+++import com.lidquan.yishigame.capture.ScreenCaptureState
+++import com.lidquan.yishigame.vision.FreeAttemptState
+++import com.lidquan.yishigame.vision.StablePage
+++import org.junit.Assert.assertEquals
+++import org.junit.Assert.assertNull
+++import org.junit.Test
+++import kotlinx.coroutines.test.runTest
+++
+++class ActionExecutorTest {
+++    private class FakeController : AccessibilityController {
+++        var taps = 0
+++        override fun tap(x: Float, y: Float) = true.also { taps++ }
+++        override fun swipe(fromX: Float, fromY: Float, toX: Float, toY: Float, durationMs: Long) = false
+++        override fun back() = false
+++        override fun queryWindows(): List<AccessibleWindow> = emptyList()
+++        override fun activeWindowPackage(): String? = null
+++    }
+++
+++    @Test fun `executor taps only after guard allow and verifies postcondition`() = runTest {
+++        val controller = FakeController()
+++        val executor = ActionExecutor(controller) { 1_500 }
+++        val context = ActionContext(
+++            AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
+++            WindowGate.MATCHED, WindowBounds(0, 0, 100, 100), StablePage("DUNGEON_DETAIL", .9f, 1_000, 1),
+++            1, 1_500, actionTargets = mapOf("dungeon.start_free" to WindowBounds(10, 10, 20, 20)),
+++            freeAttemptState = FreeAttemptState.AVAILABLE,
+++        )
+++        val allowed = executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context) { _, _ -> "BATTLE" }
+++        assertEquals(true, allowed.tapResult)
+++        assertEquals(true, allowed.postconditionMet)
+++        assertEquals(1, controller.taps)
+++        assertNull(executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) { _, _ -> "BATTLE" }.tapResult)
+++        assertEquals(1, controller.taps)
+++    }
+++}
+ diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
+-index c95beee..7e48309 100644
++index 7e48309..6362970 100644
+ --- a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
+ +++ b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
+-@@ -18,33 +18,35 @@ class ActionGuardTest {
+-         targetVisible = true,
+-         targetActive = true,
+-         windowGate = WindowGate.MATCHED,
+--        viewportValid = true,
+-+        contentViewport = WindowBounds(0, 0, 100, 100),
+-         stablePage = StablePage("DUNGEON_DETAIL", .96f, 1_000, 1),
+-         currentViewportVersion = 1,
+-         now = 1_500,
+--        allowedPages = setOf("DUNGEON_DETAIL"),
+--        targetRect = WindowBounds(10, 10, 20, 20),
+--        expectedPagesAfter = setOf("LOADING"),
+-+        actionTargets = mapOf("dungeon.start_free" to WindowBounds(10, 10, 20, 20)),
+-         freeAttemptState = FreeAttemptState.AVAILABLE,
+-     )
+-
+--    @Test fun `guard only allows dry run when every gate is confirmed`() {
+--        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
+-+    @Test fun `central policy enforces sensitive gates and cannot be weakened by caller`() {
+-+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE)
+-+        assertEquals(RiskLevel.SENSITIVE, ActionPolicyRegistry.policy(intent.type)?.riskLevel)
++@@ -32,7 +32,7 @@ class ActionGuardTest {
+          assertTrue(ActionGuard.plan(intent, safe) is GuardDecision.AllowDryRun)
+--        assertEquals(GuardDenyReason.TARGET_NOT_ACTIVE, (ActionGuard.plan(intent, safe.copy(targetActive = false)) as GuardDecision.Deny).reason)
+--        assertEquals(GuardDenyReason.WINDOW_NOT_MATCHED, (ActionGuard.plan(intent, safe.copy(windowGate = WindowGate.CHANGED)) as GuardDecision.Deny).reason)
+--        assertEquals(GuardDenyReason.CAPTURE_INACTIVE, (ActionGuard.plan(intent, safe.copy(captureState = ScreenCaptureState.Stopped("test"))) as GuardDecision.Deny).reason)
+          assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
+-+        assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(intent, safe.copy(stablePage = safe.stablePage?.copy(pageId = "SETTINGS"))) as GuardDecision.Deny).reason)
+-+        assertEquals(setOf("LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
++         assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(intent, safe.copy(stablePage = safe.stablePage?.copy(pageId = "SETTINGS"))) as GuardDecision.Deny).reason)
++-        assertEquals(setOf("LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
+++        assertEquals(setOf("BATTLE", "LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
+      }
+-
+--    @Test fun `forbidden auto is always denied`() {
+--        val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE, riskLevel = RiskLevel.FORBIDDEN_AUTO), safe) as GuardDecision.Deny
+-+    @Test fun `forbidden auto is always denied by registry`() {
+-+        assertEquals(RiskLevel.FORBIDDEN_AUTO, ActionPolicyRegistry.policy(ActionType.PURCHASE)?.riskLevel)
+-+        val decision = ActionGuard.plan(ActionIntent(ActionType.PURCHASE), safe) as GuardDecision.Deny
+-         assertEquals(GuardDenyReason.FORBIDDEN_AUTO, decision.reason)
+-     }
+-
+--    @Test fun `stale or mismatched page is denied`() {
+--        val intent = ActionIntent(ActionType.START_DUNGEON_FREE, riskLevel = RiskLevel.SENSITIVE)
+-+    @Test fun `stale mismatched missing and outside target are denied`() {
+-+        val intent = ActionIntent(ActionType.START_DUNGEON_FREE)
+-         assertEquals(GuardDenyReason.PAGE_VIEWPORT_MISMATCH, (ActionGuard.plan(intent, safe.copy(currentViewportVersion = 2)) as GuardDecision.Deny).reason)
+-         assertEquals(GuardDenyReason.PAGE_STALE, (ActionGuard.plan(intent, safe.copy(now = 4_000)) as GuardDecision.Deny).reason)
+-+        assertEquals(GuardDenyReason.TARGET_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(actionTargets = emptyMap())) as GuardDecision.Deny).reason)
+-+        val outside = safe.copy(actionTargets = mapOf("dungeon.start_free" to WindowBounds(90, 90, 110, 110)))
+-+        assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(intent, outside) as GuardDecision.Deny).reason)
+-     }
+- }
+-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt
++ 
++     @Test fun `forbidden auto is always denied by registry`() {
++diff --git a/app/src/test/java/com/lidquan/yishigame/automation/DungeonRunReducerTest.kt b/app/src/test/java/com/lidquan/yishigame/automation/DungeonRunReducerTest.kt
+ new file mode 100644
+-index 0000000..c596aa7
++index 0000000..d6d15c5
+ --- /dev/null
+-+++ b/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt
+-@@ -0,0 +1,49 @@
+-+package com.lidquan.yishigame.vision
+++++ b/app/src/test/java/com/lidquan/yishigame/automation/DungeonRunReducerTest.kt
++@@ -0,0 +1,36 @@
+++package com.lidquan.yishigame.automation
+ +
+-+import com.lidquan.yishigame.automation.WindowBounds
+-+import com.lidquan.yishigame.capture.ScreenFrameSnapshot
+-+import com.lidquan.yishigame.viewport.NormalizedRect
+-+import com.lidquan.yishigame.vision.ocr.OcrEngine
+-+import kotlinx.coroutines.runBlocking
+++import com.lidquan.yishigame.vision.FreeAttemptState
+++import com.lidquan.yishigame.vision.ocr.CounterValue
+ +import org.junit.Assert.assertEquals
+ +import org.junit.Test
+ +
+-+class ConfiguredVisionEngineTest {
+-+    private val viewport = WindowBounds(0, 0, 100, 100)
+-+    private val frame = ScreenFrameSnapshot(1, 100, 100, 400, 4, 1, ByteArray(40_000))
+-+    private val free = OcrEvidence("ocr.text", "免费(1/1)", "免费(1/1)", .9f, WindowBounds(12, 12, 24, 20))
+++class DungeonRunReducerTest {
+++    @Test fun `only total progress followed by home succeeds`() {
+++        var status = DungeonRunStatus(DungeonBusinessState.BATTLE)
+++        status = DungeonRunReducer.observe(status, DungeonObservation("BATTLE", progress = CounterValue(3, 4), autoBattleState = AutoBattleState.ON))
+++        assertEquals(DungeonBusinessState.BATTLE, status.state)
+++        status = DungeonRunReducer.observe(status, DungeonObservation("BATTLE", progress = CounterValue(4, 4), autoBattleState = AutoBattleState.ON))
+++        assertEquals(DungeonBusinessState.WAIT_HOME, status.state)
+++        status = DungeonRunReducer.observe(status, DungeonObservation("HOME"))
+++        assertEquals(DungeonBusinessState.SUCCESS, status.state)
+++    }
+ +
+-+    @Test fun `free attempt only consumes explicit free semantic signal`() = runBlocking {
+-+        assertEquals(FreeAttemptState.UNKNOWN, analyze(listOf(OcrSignalDefinition("page", full, "免费(1/1)")), emptyList(), listOf(listOf(free))).freeAttemptState)
+-+        assertEquals(FreeAttemptState.AVAILABLE, analyze(emptyList(), listOf(SemanticOcrSignalDefinition("free", full, SemanticOcrSignalType.FREE_ATTEMPT)), listOf(listOf(free))).freeAttemptState)
+-+        assertEquals(FreeAttemptState.UNKNOWN, analyze(emptyList(), listOf(SemanticOcrSignalDefinition("free", full, SemanticOcrSignalType.FREE_ATTEMPT)), listOf(emptyList())).freeAttemptState)
+-+        assertEquals(FreeAttemptState.UNKNOWN, analyze(emptyList(), listOf(SemanticOcrSignalDefinition("generic", full, SemanticOcrSignalType.GENERIC)), listOf(listOf(free))).freeAttemptState)
+++    @Test fun `early return and missing auto battle fail closed`() {
+++        val early = DungeonRunReducer.observe(
+++            DungeonRunStatus(DungeonBusinessState.BATTLE, CounterValue(3, 5)), DungeonObservation("HOME"),
+++        )
+++        assertEquals("DUNGEON_INCOMPLETE", early.errorCode)
+++        val missing = DungeonRunReducer.observe(
+++            DungeonRunStatus(DungeonBusinessState.BATTLE), DungeonObservation("BATTLE", autoBattleState = AutoBattleState.MISSING),
+++        )
+++        assertEquals("MANUAL_BATTLE_REQUIRED", missing.errorCode)
+ +    }
+ +
+-+    @Test fun `action target uses actual OCR line rect instead of search roi`() = runBlocking {
+-+        val result = analyze(
+-+            listOf(OcrSignalDefinition("page.anchor", full, "切换区域", "real.target")),
+-+            emptyList(),
+-+            listOf(listOf(free.copy(text = "切换区域", normalizedText = "切换区域"))),
+++    @Test fun `unknown free count never enters dungeon`() {
+++        val result = DungeonRunReducer.observe(
+++            DungeonRunStatus(DungeonBusinessState.DUNGEON_DETAIL), DungeonObservation("DUNGEON_DETAIL", FreeAttemptState.UNKNOWN),
+ +        )
+-+        assertEquals(free.rect, result.actionTargets.single().rect)
+++        assertEquals("FREE_ATTEMPT_UNCONFIRMED", result.errorCode)
+ +    }
+++}
++diff --git a/app/src/test/java/com/lidquan/yishigame/viewport/ContentViewportDetectorTest.kt b/app/src/test/java/com/lidquan/yishigame/viewport/ContentViewportDetectorTest.kt
++new file mode 100644
++index 0000000..5c6b803
++--- /dev/null
+++++ b/app/src/test/java/com/lidquan/yishigame/viewport/ContentViewportDetectorTest.kt
++@@ -0,0 +1,32 @@
+++package com.lidquan.yishigame.viewport
+++
+++import com.lidquan.yishigame.automation.WindowBounds
+++import com.lidquan.yishigame.capture.ScreenFrameSnapshot
+++import org.junit.Assert.assertEquals
+++import org.junit.Assert.assertNull
+++import org.junit.Test
+++
+++class ContentViewportDetectorTest {
+++    @Test fun `excludes black side bars`() {
+++        val width = 1000
+++        val height = 600
+++        val bytes = ByteArray(width * height * 4)
+++        for (y in 0 until height) for (x in 300 until 700) {
+++            val offset = (y * width + x) * 4
+++            bytes[offset] = 80
+++            bytes[offset + 1] = 60
+++            bytes[offset + 2] = 40
+++            bytes[offset + 3] = -1
+++        }
+++        val frame = ScreenFrameSnapshot(1, width, height, width * 4, 4, 1, bytes)
+++
+++        val viewport = ContentViewportDetector.detect(frame, WindowBounds(0, 0, width, height))
+ +
+-+    private suspend fun analyze(
+-+        pageSignals: List<OcrSignalDefinition>,
+-+        semanticSignals: List<SemanticOcrSignalDefinition>,
+-+        results: List<List<OcrEvidence>>,
+-+    ): VisionAnalysis {
+-+        var index = 0
+-+        val ocr = OcrEngine { _, _ -> results.getOrElse(index++) { emptyList() } }
+-+        return ConfiguredVisionEngine(
+-+            ocr,
+-+            { viewport },
+-+            VisionConfiguration(1, "test", "test", pageSignals, emptyList(), semanticSignals),
+-+        ).analyze(frame)
+++        assertEquals(WindowBounds(300, 0, 700, 600), viewport)
+ +    }
+ +
+-+    private companion object {
+-+        val full = NormalizedRect(0f, 0f, 1f, 1f)
+++    @Test fun `fails closed for an all black frame`() {
+++        val frame = ScreenFrameSnapshot(1, 800, 600, 3200, 4, 1, ByteArray(800 * 600 * 4))
+++        assertNull(ContentViewportDetector.detect(frame, WindowBounds(0, 0, 800, 600)))
+ +    }
+ +}
+-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt
++diff --git a/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
++index baf5793..3eab578 100644
++--- a/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
+++++ b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
++@@ -6,13 +6,16 @@ import org.junit.Test
++ 
++ class VisionConfigurationTest {
++     @Test
++-    fun configurationIsVersionedAndDefinesThreePagesWithTwoSignalsEach() {
+++    fun configurationIsVersionedAndDefinesRequiredPagesWithTwoSignalsEach() {
++         val configuration = initialVisionConfiguration()
++ 
++         assertEquals(1, configuration.schemaVersion)
++         assertTrue(configuration.templateSetVersion.isNotBlank())
++         assertTrue(configuration.pageDefinitionVersion.isNotBlank())
++-        assertEquals(setOf("SETTINGS", "CHARACTER_SELECT", "DUNGEON_LIST"), configuration.pages.map { it.pageId }.toSet())
+++        assertEquals(
+++            setOf("SETTINGS", "CHARACTER_SELECT", "SAFE_DIALOG", "HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE"),
+++            configuration.pages.map { it.pageId }.toSet(),
+++        )
++         assertTrue(configuration.pages.all { it.required.size >= 2 })
++     }
++ }
++diff --git a/app/src/test/java/com/lidquan/yishigame/vision/ocr/CounterParserTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/ocr/CounterParserTest.kt
+ new file mode 100644
+-index 0000000..f332fb8
++index 0000000..10fcbf3
+ --- /dev/null
+-+++ b/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt
+-@@ -0,0 +1,42 @@
+-+package com.lidquan.yishigame.vision
+++++ b/app/src/test/java/com/lidquan/yishigame/vision/ocr/CounterParserTest.kt
++@@ -0,0 +1,28 @@
+++package com.lidquan.yishigame.vision.ocr
+ +
+-+import com.lidquan.yishigame.capture.LatestFrameStore
+-+import java.nio.ByteBuffer
+-+import kotlinx.coroutines.delay
+-+import kotlinx.coroutines.runBlocking
+++import com.lidquan.yishigame.automation.WindowBounds
+++import com.lidquan.yishigame.vision.FreeAttemptState
+++import com.lidquan.yishigame.vision.OcrEvidence
+ +import org.junit.Assert.assertEquals
+ +import org.junit.Assert.assertNull
+ +import org.junit.Test
+ +
+-+class VisionWorkerTest {
+-+    @Test fun `invalidate keeps worker alive for stop then restart lifecycle`() = runBlocking {
+-+        val store = LatestFrameStore()
+-+        val worker = VisionWorker(
+-+            store,
+-+            analyze = { VisionAnalysis(PageDetection.Matched("SETTINGS", .95f, emptyList()), FreeAttemptState.UNKNOWN) },
+-+            framesPerSecond = 10,
+-+        )
+-+        worker.start(this) { 1 }
+-+        try {
+-+            publish(store, 1)
+-+            delay(150)
+-+            publish(store, 2)
+-+            delay(150)
+-+            assertEquals("SETTINGS", worker.metrics.value.stablePage?.pageId)
+-+
+-+            worker.invalidate()
+-+            assertNull(worker.metrics.value.stablePage)
+-+            publish(store, 3)
+-+            delay(150)
+-+            publish(store, 4)
+-+            delay(150)
+-+            assertEquals("SETTINGS", worker.metrics.value.stablePage?.pageId)
+-+        } finally {
+-+            worker.stop()
+-+        }
+++class CounterParserTest {
+++    @Test fun `free counter accepts arbitrary valid total`() {
+++        assertEquals(CounterValue(2, 2), parseCounter("免费（2 / 2）", "免费"))
+++        assertEquals(CounterValue(0, 3), parseCounter("免费(0/3)", "免费"))
+++        assertNull(parseCounter("免费(4/3)", "免费"))
+++    }
+++
+++    @Test fun `free state is available exhausted or unknown`() {
+++        fun evidence(text: String) = OcrEvidence("free", text, normalizeOcrText(text), .9f, WindowBounds(0, 0, 1, 1))
+++        assertEquals(FreeAttemptState.AVAILABLE, freeAttemptState(listOf(evidence("免费(2/2)"))))
+++        assertEquals(FreeAttemptState.EXHAUSTED, freeAttemptState(listOf(evidence("免费(0/2)"))))
+++        assertEquals(FreeAttemptState.UNKNOWN, freeAttemptState(listOf(evidence("前往"))))
+ +    }
+ +
+-+    private fun publish(store: LatestFrameStore, timestamp: Long) {
+-+        store.publish(1, 1, 4, 4, timestamp, ByteBuffer.wrap(byteArrayOf(0, 0, 0, 0)))
+++    @Test fun `progress total is never fixed to five`() {
+++        assertEquals(CounterValue(4, 4), parseCounter("4/4"))
+++        assertEquals(CounterValue(5, 5), parseCounter("进度 5/5"))
+ +    }
+ +}
+-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
+-index d420d4e..268dfee 100644
+---- a/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
+-+++ b/app/src/test/java/com/lidquan/yishigame/vision/template/TemplateMatcherTest.kt
+-@@ -26,7 +26,7 @@ class TemplateMatcherTest {
+-         val frame = ScreenFrameSnapshot(1, 2, 1, 8, 4, 1, byteArrayOf(1, 2, 3, 4, 9, 8, 7, 6))
+-         val viewport = WindowBounds(0, 0, 2, 1)
+-         val required = TemplateDefinition("required", 1, "PAGE", NormalizedRect(0f, 0f, .5f, 1f), .99f)
+--        val negative = TemplateDefinition("negative", 1, "PAGE", NormalizedRect(.5f, 0f, 1f, 1f), .99f, negative = true)
+-+        val negative = TemplateDefinition("negative", 1, "PAGE", NormalizedRect(.5f, 0f, 1f, 1f), .99f)
+-         val requiredEvidence = TemplateMatcher.match(required, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(1, 2, 3, 4)))!!
+-         val negativeEvidence = TemplateMatcher.match(negative, frame, viewport, RgbaTemplate(1, 1, byteArrayOf(9, 8, 7, 6)))!!
+-         val detector = PageDetector(listOf(PageDefinition("PAGE", 1, listOf(SignalRule("required", .99f)), negative = listOf(SignalRule("negative", .99f)), threshold = .99f, minimumMargin = .01f)))
+-diff --git a/templates/vision/manifests/template-set.example.json b/templates/vision/manifests/template-set.example.json
+-index a934193..455dcb6 100644
+---- a/templates/vision/manifests/template-set.example.json
+-+++ b/templates/vision/manifests/template-set.example.json
+-@@ -9,7 +9,6 @@
+-       "roi": {"left": 0.7, "top": 0.8, "right": 0.95, "bottom": 0.95},
+-       "threshold": 0.9,
+-       "scalePolicy": "FIXED",
+--      "negative": false,
+-       "asset": "private://page.example.anchor.png"
+-     }
+-   ]
+-diff --git a/tools/vision-sampler/vision_sampler.py b/tools/vision-sampler/vision_sampler.py
+-index 6a19145..1bbee31 100644
+---- a/tools/vision-sampler/vision_sampler.py
+-+++ b/tools/vision-sampler/vision_sampler.py
+-@@ -57,7 +57,6 @@ def crop(args: argparse.Namespace) -> None:
+-         "roi": dict(zip(("left", "top", "right", "bottom"), args.roi)),
+-         "threshold": args.threshold,
+-         "scalePolicy": "FIXED",
+--        "negative": args.negative,
+-         "asset": asset.name,
+-         "privacyReview": "PENDING",
+-     }
+-@@ -78,7 +77,6 @@ def main() -> None:
+-     command.add_argument("--page-id", default="UNKNOWN")
+-     command.add_argument("--threshold", type=float, default=0.90)
+-     command.add_argument("--template-set-version", type=int, default=1)
+--    command.add_argument("--negative", action="store_true")
+-     command.set_defaults(run=crop)
+-     args = parser.parse_args()
+-     if args.viewport is not None and len(args.viewport) != 4:
+diff --git a/codex/reports/IMPLEMENT-0006.md b/codex/reports/IMPLEMENT-0006.md
+new file mode 100644
+index 0000000..3d71cae
+--- /dev/null
++++ b/codex/reports/IMPLEMENT-0006.md
+@@ -0,0 +1,52 @@
++# IMPLEMENT-0006 — 未完成的真机开发交接
++
++- 对应需求：`REQ-0006`
++- 分支：`feat/req-0006-single-dungeon-loop`
++- 实现提交：`c3820ff687b25c77ee265e898c98c79203b02366`
++- 结论：**未达到 REQ-0006 验收标准，不应合入 main 或标记 ACCEPTED。**
++
++## 本次实现目标与实际进展
++
++目标是当前角色单副本完整闭环。已接入最小 Action Executor、页面识别、免费次数解析、区域切换、战斗进度观察、DailyExecution 和本机私有结构化日志。真机上曾通过受控 Action Guard 完成 T01→区域地图→区域选择→切换至目标区域，后续页面识别超时；随后游戏出现“网络错误 / 已与服务器断开连接”。本次恢复期间仍见该错误，无法继续真实副本。没有真实通关，也没有 DailyExecution SUCCESS。
++
++## 修改文件
++
++`MainViewModel.kt`、`ActionGuard.kt`、`Daos.kt`、`AssistantApp.kt`、`ConfiguredVisionEngine.kt`、`VisionModels.kt`、`VisionWorker.kt`、`OcrEngine.kt`、`ActionGuardTest.kt`、`VisionConfigurationTest.kt`。
++
++## 新增文件
++
++`ActionExecutor.kt`、`DungeonRun.kt`、`RunLogger.kt`、`ContentViewportDetector.kt` 及对应的四个 JVM 测试文件。
++
++## 核心实现与技术决策
++
++- 真实游戏 tap 只经 `ActionExecutor`：先由 Action Guard 核验稳定页面、目标窗口、Viewport、识别目标及敏感操作条件，再调用辅助功能 tap，随后等待页面后置条件。没有通过 ADB 向游戏注入 tap。
++- 详情页解析 `免费(current/total)`；仅 `current > 0` 可进入。无法确认则失败停止。列表候选改为观察首个副本右上角数字角标，不再以 `Lv` 文字冒充免费标记。
++- 进度采用 OCR 的 `current/total`，不写死 5/5；仅观察到完成进度且返回 T01 才写 SUCCESS。若进入战斗后未完成即返回，写 `DUNGEON_INCOMPLETE`。
++- 游戏异常对话框不自动点“确定”；返回 `GAME_DIALOG_REQUIRES_USER`。自动战斗未亮与图标缺失尚未可靠区分，统一视为 UNKNOWN 并以 `AUTO_BATTLE_UNCONFIRMED` 停止，避免误触。
++- 运行日志保存在 App 私有目录；公开仓库只放脱敏摘要。当前日志结构已含业务状态、动作目标、Guard 决策、tap 结果和耗时，但尚未经成功会话验证。
++
++## 构建与自动测试
++
++- `assembleDebug`：通过。
++- `testDebugUnitTest`：40/40 通过。
++- `connectedDebugAndroidTest`：4 项执行，3 通过、1 项因缺少私有 fixture 跳过；Gradle 整体通过。
++- `git diff --check`：通过。
++- `python3 tools/security/check_public_repo.py --history`：通过；未提交原始截图、设备地址、账号或本机原始日志。
++
++## 真机测试结果
++
++- 有线 ADB 识别到目标 Pad；未把设备标识写入仓库。
++- 中断前的受控运行完成了主界面副本入口、打开区域选择和真实区域切换；切换后 `ACTION_SELECT_AREA_BLOCKED_OR_UNVERIFIED`，没有到达地下城列表。
++- 恢复后游戏显示“网络错误 / 已与服务器断开连接”；未在断线状态下注入游戏点击。测试 APK 的设备测试会卸载/重装助手，导致此前 App 私有运行日志不再保留。真实会话摘要见 `codex/reports/runs/REQ-0006-run-summary.md`。
++
++## 已知问题、未完成内容、后续建议
++
++1. **阻塞验收：** 未验证 T06 角标、T07 免费次数、真实前往、战斗自动开关、进度达到 total/total、自动回 T01、同日再次运行跳过。服务器恢复后必须重新跑完整会话，并保留私有 JSONL 及脱敏摘要。
++2. 首个角标的 OCR ROI 与点击矩形只基于真实截图定位，尚未在最新构建的实时画面验证。无正向识别时 Guard 会拒绝点击。
++3. 自动战斗 OFF / MISSING 检测仍缺可靠真机样本；当前安全停止而非盲点。补齐本机私有样本并验证后才能开启该动作。
++4. `currentDungeon` 尚未从详情标题可靠提取；DailyExecution 暂用单副本占位键，不能证明按实际副本 ID 去重。需在真实闭环前修正。
++5. 游戏正常连通后，先验证识别与动作后置条件，再执行一次完整成功和一次同日跳过；未成功前不要扩展多副本或新需求。
++
++## Git commit hash
++
++实现提交：`c3820ff687b25c77ee265e898c98c79203b02366`。本报告与 handoff 由后续文档提交承载；最终分支 HEAD 见交接消息。
+diff --git a/codex/reports/runs/REQ-0006-run-summary.md b/codex/reports/runs/REQ-0006-run-summary.md
+new file mode 100644
+index 0000000..980440d
+--- /dev/null
++++ b/codex/reports/runs/REQ-0006-run-summary.md
+@@ -0,0 +1,25 @@
++# REQ-0006 真机运行脱敏摘要
++
++状态：**FAILED / 未完成**。没有成功运行样本，不能作为 REQ-0006 验收证据。
++
++## 中断前受控会话
++
++- sessionId：原始 App 私有日志在设备测试重装后丢失，无法核验；不编造 ID。
++- 总运行时间：未保留可靠起止时间，无法核验。
++- 执行区域：从当前区域切换至“亡灵之地”（视觉截图已观察）。
++- 执行副本：未进入列表；无副本名称。
++- 状态轨迹：`HOME → AREA_MAP → AREA_PICKER → AREA_MAP(视觉可见，但页面后置条件超时) → FAILED`。
++- 真实游戏 gesture：已确认 3 次，均由当时构建的 Action Guard 放行：打开地图、打开区域选择、选择区域。第三次 tap 使地图切换，但动作后置条件未在时限内确认，错误码 `ACTION_SELECT_AREA_BLOCKED_OR_UNVERIFIED`。
++- 免费次数：未读取；`UNKNOWN`。战斗进度：未进入战斗，无数据。自动战斗：未检测，无操作。
++- 购买/钻石确认：0 次；未执行购买动作。
++
++## 恢复后的设备状态
++
++- sessionId：无新业务会话。游戏显示“网络错误 / 已与服务器断开连接”。
++- 状态轨迹：设备连通 → 游戏断线对话框 → 未启动真实游戏流程。
++- 真实游戏 gesture：0 次。没有尝试通过游戏确认按钮掩盖服务器状态。
++- 最终结果：**BLOCKED / GAME_SERVER_DISCONNECTED**；并非副本通关失败判定。
++
++## 尚缺的成功样本
++
++T06 角标、T07 `免费(n/m)`、`前往`、原生自动战斗状态、逐次 `progress current/total`、`total/total`、自动返回 T01、DailyExecution SUCCESS 和同日跳过均未获真机证据。服务器恢复后须以新 session 采集并更新本摘要。
+diff --git a/docs/requirements/REQ-0006.md b/docs/requirements/REQ-0006.md
+index c761a06..2f6d8cc 100644
+--- a/docs/requirements/REQ-0006.md
++++ b/docs/requirements/REQ-0006.md
+@@ -1157,3 +1157,104 @@ Review 时优先依据：
+ ```
+ 
+ 而不是只依据 Codex 的自然语言结论。
++
++
++---
++
++# 23. 启动前强制 Precheck（2026-09-24）
++
++每次启动 REQ-0006 真机测试前，必须先执行统一 Precheck。Precheck 未通过时，不允许进入 DungeonRun，也不允许产生任何业务点击。
++
++## 23.1 必须检查
++
++至少确认：
++
++- 助手 APK 当前可见且正常运行。
++- AccessibilityService 已连接。
++- MediaProjection 截图处于 Active。
++- 目标游戏窗口存在。
++- 助手窗口存在。
++- WindowGate = MATCHED。
++- contentViewport 已确认且有效。
++- 当前布局为“游戏在左、助手在右”。
++- 游戏页面已稳定识别。
++- 首次单副本闭环测试必须从 HOME 开始。
++
++布局要求：
++
++```text
++┌──────────────────────────────┐
++│       游戏       │   助手    │
++│       左侧       │   右侧    │
++└──────────────────────────────┘
++```
++
++允许分屏分隔线存在少量像素误差，但不允许：
++
++- 游戏在右、助手在左。
++- 两个窗口明显重叠。
++- 两个窗口不在同一水平工作区。
++- 游戏窗口不可见。
++- 助手窗口不可见。
++
++## 23.2 Precheck 失败行为
++
++任一检查失败：
++
++```text
++PRECHECK_FAILED
++→ 不启动 REQ-0006
++→ 不执行 ActionIntent
++→ 不调用真实 tap/swipe
++→ 记录明确 errorCode
++```
++
++错误码至少覆盖：
++
++```text
++PRECHECK_ACCESSIBILITY_UNAVAILABLE
++PRECHECK_CAPTURE_INACTIVE
++PRECHECK_GAME_WINDOW_MISSING
++PRECHECK_ASSISTANT_WINDOW_MISSING
++PRECHECK_WINDOW_NOT_MATCHED
++PRECHECK_CONTENT_VIEWPORT_UNCONFIRMED
++PRECHECK_LAYOUT_NOT_GAME_LEFT_ASSISTANT_RIGHT
++PRECHECK_GAME_PAGE_NOT_STABLE
++PRECHECK_GAME_NOT_AT_HOME
++```
++
++用户修正环境后重新点击测试即可，不在本轮自动移动窗口、自动启动游戏或自动关闭未知系统弹窗。
++
++## 23.3 与现有 Target Active 握手的关系
++
++Precheck 只确认测试环境整体正确，不要求游戏窗口在检查瞬间获得焦点。
++
++典型流程：
++
++```text
++助手位于右侧并由用户点击“运行一次单副本测试”
++↓
++Precheck 确认游戏左 / 助手右、截图、viewport、HOME 等全部正常
++↓
++进入 WAIT_TARGET_ACTIVE
++↓
++现有握手等待目标游戏 active
++↓
++RUNNING_PLACEHOLDER
++↓
++才允许 ActionGuard 放行业务动作
++```
++
++这样既能确认双窗口布局，又不会因为用户刚点击了右侧助手按钮而错误要求游戏同时 active。
++
++## 23.4 验收补充
++
++REQ-0006 的首次真实 SUCCESS 前，运行日志必须能证明：
++
++```text
++REQ-0006_PRECHECK READY
++↓
++业务动作开始
++```
++
++如果没有成功 Precheck 记录，则该次真机会话不计入正式验收。

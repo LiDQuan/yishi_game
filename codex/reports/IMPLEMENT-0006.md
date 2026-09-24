@@ -1,5 +1,13 @@
 # IMPLEMENT-0006 — 未完成的真机开发交接
 
+## 2026-09-24 启动前 Precheck 续测（仍未完成）
+
+- 本轮实现提交：`8de00aa10698edb4c492a931aaf3a96eb1ad642f`；继续使用原开发分支，未合入 main。
+- 修复了两处启动门槛问题：环境不合格时现在仍可按测试按钮并获得明确 `PRECHECK_FAILED`；稳定页面必须与当前 viewport 版本一致且采样时间不超过 2 秒，避免旧 HOME 结果被误用。
+- 为辅助功能、截图权限、游戏窗口、viewport、稳定页面及 WindowGate 缺失补了 JVM 失败用例。`./gradlew test`：50 项通过；`assembleDebug`：通过；`connectedDebugAndroidTest`：3 项通过、1 项因缺少私有样本跳过。`git diff --check` 与公开仓库安全扫描通过。
+- 真机：有线 ADB 已连接；游戏在左、助手在右，游戏停在 HOME。点击助手测试按钮后确实显示 `PRECHECK_FAILED / PRECHECK_ACCESSIBILITY_UNAVAILABLE`，没有业务点击。设备测试重新安装了助手，导致 Android 辅助功能和屏幕采集授权失效；目前辅助功能系统开关仍关闭，尚未得到用户重新授权。因此 **未观察到 `REQ-0006_PRECHECK READY`**，其他失败场景只有 JVM 验证，不能宣称真机验证。
+- 当前实际业务位置仍是 HOME，最后动作是助手内的 Precheck 按钮，错误码 `PRECHECK_ACCESSIBILITY_UNAVAILABLE`；本轮真实游戏业务 tap 为 0，**无真实 SUCCESS**。授权恢复后应先完成剩余 Precheck 真机矩阵，再开始受控副本链。下文记载的是此前会话，不是本轮成功证据。
+
 - 对应需求：`REQ-0006`
 - 分支：`feat/req-0006-single-dungeon-loop`
 - 实现提交：`c3820ff687b25c77ee265e898c98c79203b02366`

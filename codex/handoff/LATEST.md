@@ -1,5 +1,14 @@
 # 最新交接：REQ-0006（未完成）
 
+## 2026-09-24 Precheck 续测更新
+
+- 最新实现提交：`8de00aa10698edb4c492a931aaf3a96eb1ad642f`；仍在 `feat/req-0006-single-dungeon-loop`，未合入 main。
+- 代码变化：失败状态下允许显式触发 Precheck 并输出原因；拒绝过期或 viewport 版本不匹配的稳定页面；扩充失败分支 JVM 测试。
+- `git diff --stat 54ca9aeb..8de00aa`：3 个文件，57 行新增、5 行删除；完整代码差异另见 `LATEST.patch`。
+- 测试：50 项 JVM 通过；Debug 构建通过；设备测试 3 通过、1 私有样本缺失而跳过；公开安全扫描和 diff 检查通过。
+- 真机：游戏左、助手右、HOME 可见；Precheck 失败码 `PRECHECK_ACCESSIBILITY_UNAVAILABLE`，没有真实游戏业务点击。设备测试重装助手后系统授权失效，辅助功能尚未由用户重新打开。**没有 READY，也没有单副本 SUCCESS。**
+- 复审重点：先确认失败态按钮可达与旧页面拒绝逻辑；待授权恢复后再审 READY、各真机失败场景及区域切换后置条件。下文是此前提交的交接内容。
+
 - 当前任务编号：`REQ-0006`
 - 当前版本：`0.2.0-m1`（debug）
 - 分支：`feat/req-0006-single-dungeon-loop`
