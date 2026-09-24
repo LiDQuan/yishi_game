@@ -11,6 +11,9 @@ import com.lidquan.yishigame.accessibility.GameAccessibilityService
 import com.lidquan.yishigame.automation.AutomationEvent
 import com.lidquan.yishigame.automation.EnvironmentChangeReason
 import com.lidquan.yishigame.automation.RecoveryRequirement
+import com.lidquan.yishigame.automation.Req0006Precheck
+import com.lidquan.yishigame.automation.Req0006PrecheckInput
+import com.lidquan.yishigame.automation.Req0006PrecheckResult
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.AutomationStateMachine
 import com.lidquan.yishigame.automation.WindowBounds
@@ -189,10 +192,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun beginReq0006() {
         refresh()
-        if (!mutableUiState.value.canArmPlaceholder || req0006Job?.isActive == true) {
-            record("REQ-0006", "BLOCKED", "ENVIRONMENT_NOT_READY")
+        if (req0006Job?.isActive == true) {
+            record("REQ-0006", "BLOCKED", "ALREADY_RUNNING")
             return
         }
+        val snapshot = mutableUiState.value
+        val service = GameAccessibilityService.instance
+        val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
+        val windows = service?.queryWindows().orEmpty()
+        val gameWindow = windows
+            .filter { configuredPackage.isNotBlank() && it.packageName == configuredPackage }
+            .maxByOrNull { it.layer }
+        val assistantWindow = windows
+            .filter { it.packageName == appContext.packageName }
+            .maxByOrNull { it.layer }
+        val precheck = Req0006Precheck.evaluate(
+            Req0006PrecheckInput(
+                accessibilityEnabled = snapshot.accessibilityEnabled,
+                captureActive = snapshot.captureState is ScreenCaptureState.Active,
+                gameWindow = gameWindow?.bounds,
+                assistantWindow = assistantWindow?.bounds,
+                windowGate = snapshot.windowGate,
+                contentViewport = snapshot.contentViewport,
+                stablePageId = snapshot.visionMetrics.stablePage?.pageId,
+            ),
+        )
+        if (precheck is Req0006PrecheckResult.Failed) {
+            val error = "PRECHECK_" + precheck.reason.name
+            req0006State = "PRECHECK_FAILED"
+            req0006Error = error
+            record("REQ-0006_PRECHECK", "FAILED", error)
+            refresh()
+            return
+        }
+        if (!snapshot.canArmPlaceholder) {
+            req0006State = "PRECHECK_FAILED"
+            req0006Error = "PRECHECK_ENVIRONMENT_NOT_READY"
+            record("REQ-0006_PRECHECK", "FAILED", "PRECHECK_ENVIRONMENT_NOT_READY")
+            refresh()
+            return
+        }
+        record("REQ-0006_PRECHECK", "READY")
         req0006Pending = true
         req0006State = "WAIT_TARGET_ACTIVE"
         req0006Error = null
