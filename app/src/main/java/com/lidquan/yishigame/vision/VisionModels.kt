@@ -1,6 +1,8 @@
 package com.lidquan.yishigame.vision
 
 import com.lidquan.yishigame.automation.WindowBounds
+import com.lidquan.yishigame.automation.AutoBattleState
+import com.lidquan.yishigame.vision.ocr.CounterValue
 
 sealed interface VisionEvidence {
     val id: String
@@ -60,4 +62,9 @@ data class VisionMetrics(
     val stablePage: StablePage? = null,
     val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
     val actionTargets: Map<String, WindowBounds> = emptyMap(),
+    val progress: CounterValue? = null,
+    val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+    val currentMap: String? = null,
+    val currentDungeon: String? = null,
+    val evidenceIds: List<String> = emptyList(),
 )

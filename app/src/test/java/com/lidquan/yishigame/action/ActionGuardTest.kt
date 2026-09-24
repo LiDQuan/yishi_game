@@ -32,7 +32,7 @@ class ActionGuardTest {
         assertTrue(ActionGuard.plan(intent, safe) is GuardDecision.AllowDryRun)
         assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED, (ActionGuard.plan(intent, safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
         assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(intent, safe.copy(stablePage = safe.stablePage?.copy(pageId = "SETTINGS"))) as GuardDecision.Deny).reason)
-        assertEquals(setOf("LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
+        assertEquals(setOf("BATTLE", "LOADING"), (ActionGuard.plan(intent, safe) as GuardDecision.AllowDryRun).plan.expectedPageAfter)
     }
 
     @Test fun `forbidden auto is always denied by registry`() {

@@ -21,6 +21,8 @@ import com.lidquan.yishigame.action.ActionGuard
 import com.lidquan.yishigame.action.ActionIntent
 import com.lidquan.yishigame.action.ActionType
 import com.lidquan.yishigame.action.GuardDecision
+import com.lidquan.yishigame.action.ActionExecutor
+import com.lidquan.yishigame.action.ActionExecution
 import com.lidquan.yishigame.capture.MediaProjectionScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureController
 import com.lidquan.yishigame.capture.ScreenCaptureState
@@ -28,17 +30,25 @@ import com.lidquan.yishigame.capture.FrameMetadata
 import com.lidquan.yishigame.config.TargetGameConfig
 import com.lidquan.yishigame.diagnostics.DiagnosticEvent
 import com.lidquan.yishigame.diagnostics.DiagnosticRecorder
+import com.lidquan.yishigame.diagnostics.RunLogger
+import com.lidquan.yishigame.data.AppDatabase
+import com.lidquan.yishigame.data.DailyExecutionEntity
+import com.lidquan.yishigame.automation.AutoBattleState
 import com.lidquan.yishigame.vision.VisionMetrics
 import com.lidquan.yishigame.vision.VisionWorker
 import com.lidquan.yishigame.vision.ConfiguredVisionEngine
 import com.lidquan.yishigame.vision.ocr.MlKitChineseOcrEngine
 import com.lidquan.yishigame.viewport.WindowGeometry
+import com.lidquan.yishigame.viewport.ContentViewportDetector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class EnvironmentUiState(
     val automationState: AutomationState = AutomationState.IDLE,
@@ -56,6 +66,9 @@ data class EnvironmentUiState(
     val windowGate: WindowGate = WindowGate.UNAVAILABLE,
     val deviceSummary: String = "",
     val recentEvents: List<DiagnosticEvent> = emptyList(),
+    val req0006SessionId: String? = null, // public-scan: allow - runtime ID, not a credential
+    val req0006State: String = "IDLE",
+    val req0006Error: String? = null,
 ) {
     val canArmPlaceholder: Boolean get() =
         automationState == AutomationState.READY &&
@@ -88,6 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastCaptureActive = false
     private var lastVisionPackage = ""
     private var lastVisionGate: WindowGate? = null
+    private var req0006Pending = false
+    private var req0006Job: Job? = null
+    private var req0006SessionId: String? = null // public-scan: allow - runtime ID, not a credential
+    private var req0006State: String = "IDLE"
+    private var req0006Error: String? = null
     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
 
@@ -142,7 +160,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             record("PRECHECK", "FAILED", "ENV_TARGET_WINDOW_NOT_READY")
             return
         }
-        acceptContentViewportProfile(snapshot.windowBounds, snapshot.windowBounds)
+        val frame = captureController.frameStore.latestSnapshot()
+        val contentViewport = frame?.let { ContentViewportDetector.detect(it, snapshot.windowBounds) }
+        if (contentViewport == null) {
+            stateMachine.dispatch(AutomationEvent.Fail("ENV_CONTENT_VIEWPORT_UNCONFIRMED"))
+            record("PRECHECK", "FAILED", "ENV_CONTENT_VIEWPORT_UNCONFIRMED")
+            return
+        }
+        acceptContentViewportProfile(snapshot.windowBounds, contentViewport)
         visionWorker.invalidate()
         stateMachine.dispatch(AutomationEvent.DeviceReady)
         stateMachine.dispatch(AutomationEvent.CheckWindow)
@@ -160,6 +185,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             record("AUTOMATION_PLACEHOLDER", "ARMED")
             scheduleTargetActivationTimeout()
         }
+    }
+
+    fun beginReq0006() {
+        refresh()
+        if (!mutableUiState.value.canArmPlaceholder || req0006Job?.isActive == true) {
+            record("REQ-0006", "BLOCKED", "ENVIRONMENT_NOT_READY")
+            return
+        }
+        req0006Pending = true
+        req0006State = "WAIT_TARGET_ACTIVE"
+        req0006Error = null
+        req0006SessionId = null
+        beginPlaceholder()
+        refresh()
     }
 
     fun requestResumePlaceholder() {
@@ -186,6 +225,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stop() {
         targetActivationTimeout?.cancel()
+        req0006Job?.cancel()
+        req0006Pending = false
         stateMachine.dispatch(AutomationEvent.Stop)
         captureController.stop()
         visionWorker.invalidate()
@@ -207,7 +248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun dungeonAnchorDryRun(state: EnvironmentUiState): GuardDecision =
         ActionGuard.plan(
-            ActionIntent(ActionType.OPEN_DUNGEON),
+            ActionIntent(ActionType.OPEN_DUNGEON_LIST),
             ActionContext(
                 automationState = state.automationState,
                 accessibilityConnected = state.accessibilityEnabled,
@@ -277,6 +318,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 record("AUTOMATION_PLACEHOLDER", "STARTED")
             }
         }
+        if (req0006Pending && stateMachine.state.value == AutomationState.RUNNING_PLACEHOLDER && req0006Job?.isActive != true) {
+            req0006Pending = false
+            req0006Job = viewModelScope.launch { runReq0006() }
+        }
         val priorInput = mutableUiState.value.targetPackageInput
         val refreshed = EnvironmentUiState(
             automationState = stateMachine.state.value,
@@ -294,8 +339,211 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             windowGate = gate,
             deviceSummary = deviceSummary(),
             recentEvents = DiagnosticRecorder.events.value.takeLast(12).reversed(),
+            req0006SessionId = req0006SessionId, // public-scan: allow - runtime ID, not a credential
+            req0006State = req0006State,
+            req0006Error = req0006Error,
         )
         mutableUiState.value = refreshed.copy(dryRunDecision = dungeonAnchorDryRun(refreshed))
+    }
+
+    private suspend fun runReq0006() {
+        val logger = RunLogger(appContext)
+        logger.start(mapOf(
+            "startedAt" to System.currentTimeMillis(),
+            "currentRoleKey" to "current-role",
+            "appVersion" to appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName,
+        ))
+        req0006SessionId = logger.sessionId // public-scan: allow - runtime ID, not a credential
+        req0006State = "STARTED"
+        val dao = AppDatabase.get(appContext).dailyExecutionDao()
+        val dayKey = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+        val dailyId = "${dayKey}:current-role:first-free-dungeon"
+        val prior = dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon")
+        if (prior?.status == "SUCCESS") {
+            finishReq0006(logger, "SKIPPED", "DAILY_ALREADY_SUCCESS")
+            return
+        }
+        dao.upsert(DailyExecutionEntity(
+            id = dailyId, gameDayKey = dayKey, roleId = "current-role", actionType = "DUNGEON",
+            targetId = "first-free-dungeon", status = "RUNNING", attemptCount = (prior?.attemptCount ?: 0) + 1,
+            startedAt = System.currentTimeMillis(),
+        ))
+        val runningRecord = requireNotNull(dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon"))
+        val controller = GameAccessibilityService.instance
+        if (controller == null) {
+            persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ACCESSIBILITY_UNAVAILABLE")
+            return
+        }
+        val executor = ActionExecutor(controller)
+        var actions = 0
+        var lastProgressCurrent: Int? = null
+        var previousBusinessState: String? = null
+        var dungeonCompleted = false
+        var enteredBattle = false
+        var areaSelectionIssued = false
+        val deadline = System.currentTimeMillis() + req0006TimeoutMillis
+        while (System.currentTimeMillis() < deadline && actions < req0006MaxActions) {
+            if (stateMachine.state.value != AutomationState.RUNNING_PLACEHOLDER) {
+                persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ENVIRONMENT_CHANGED")
+                return
+            }
+            val snapshot = mutableUiState.value
+            val page = snapshot.visionMetrics.stablePage?.pageId
+            val progress = snapshot.visionMetrics.progress
+            req0006State = page ?: "WAIT_STABLE_PAGE"
+            logger.state(mapOf(
+                "businessState" to req0006State,
+                "previousState" to previousBusinessState,
+                "stablePage" to page,
+                "currentMap" to snapshot.visionMetrics.currentMap,
+                "currentDungeon" to snapshot.visionMetrics.currentDungeon,
+                "freeAttemptState" to snapshot.visionMetrics.freeAttemptState.name,
+                "progressCurrent" to progress?.current,
+                "progressTotal" to progress?.total,
+                "autoBattleState" to snapshot.visionMetrics.autoBattleState.name,
+            ))
+            previousBusinessState = req0006State
+            if (progress?.current != null && progress.current != lastProgressCurrent) lastProgressCurrent = progress.current
+            if (page == "BATTLE") {
+                enteredBattle = true
+                if (progress != null && progress.current == progress.total) dungeonCompleted = true
+            }
+            val intent = when (page) {
+                "SAFE_DIALOG" -> {
+                    persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "GAME_DIALOG_REQUIRES_USER")
+                    return
+                }
+                "CHARACTER_SELECT" -> ActionIntent(ActionType.ENTER_GAME)
+                "HOME" -> {
+                    if (dungeonCompleted) {
+                        dao.upsert(runningRecord.copy(status = "SUCCESS", finishedAt = System.currentTimeMillis(), resultCode = "SUCCESS", errorCode = null))
+                        finishReq0006(logger, "SUCCESS", null)
+                        return
+                    }
+                    if (enteredBattle) {
+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "DUNGEON_INCOMPLETE")
+                        return
+                    }
+                    ActionIntent(ActionType.OPEN_AREA_MAP)
+                }
+                "AREA_MAP" -> when {
+                    !areaSelectionIssued -> ActionIntent(ActionType.OPEN_AREA_SWITCH)
+                    snapshot.visionMetrics.currentMap == req0006TargetArea -> ActionIntent(ActionType.OPEN_DUNGEON_LIST)
+                    else -> {
+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AREA_SWITCH_UNVERIFIED")
+                        return
+                    }
+                }
+                "AREA_PICKER" -> ActionIntent(ActionType.SELECT_AREA)
+                "DUNGEON_LIST" -> ActionIntent(ActionType.SELECT_DUNGEON)
+                "DUNGEON_DETAIL" -> {
+                    if (snapshot.visionMetrics.freeAttemptState != com.lidquan.yishigame.vision.FreeAttemptState.AVAILABLE) {
+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "FREE_ATTEMPT_UNCONFIRMED")
+                        return
+                    }
+                    ActionIntent(ActionType.START_DUNGEON_FREE)
+                }
+                "BATTLE" -> when {
+                    progress != null && progress.current == progress.total -> {
+                        delay(1_000)
+                        continue
+                    }
+                    snapshot.visionMetrics.autoBattleState == AutoBattleState.OFF -> ActionIntent(ActionType.ENABLE_AUTO_BATTLE)
+                    snapshot.visionMetrics.autoBattleState == AutoBattleState.MISSING -> {
+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "MANUAL_BATTLE_REQUIRED")
+                        return
+                    }
+                    snapshot.visionMetrics.autoBattleState == AutoBattleState.UNKNOWN -> {
+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AUTO_BATTLE_UNCONFIRMED")
+                        return
+                    }
+                    else -> {
+                        delay(1_000)
+                        continue
+                    }
+                }
+                else -> {
+                    delay(500)
+                    continue
+                }
+            }
+            val execution = executor.execute(intent, actionContext(snapshot)) { expected, timeout -> awaitStablePage(expected, timeout) }
+            actions++
+            logAction(logger, intent, execution, actions)
+            if (execution.decision is GuardDecision.Deny || execution.tapResult != true || !execution.postconditionMet) {
+                persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ACTION_${intent.type.name}_BLOCKED_OR_UNVERIFIED")
+                return
+            }
+            if (intent.type == ActionType.SELECT_AREA) areaSelectionIssued = true
+        }
+        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", if (actions >= req0006MaxActions) "MAX_ACTIONS_REACHED" else "RUN_TIMEOUT")
+    }
+
+    private fun actionContext(state: EnvironmentUiState) = ActionContext(
+        automationState = state.automationState,
+        accessibilityConnected = state.accessibilityEnabled,
+        captureState = state.captureState,
+        targetVisible = state.targetVisible,
+        targetActive = state.targetActive,
+        windowGate = state.windowGate,
+        contentViewport = state.contentViewport,
+        stablePage = state.visionMetrics.stablePage,
+        currentViewportVersion = windowMonitor.version,
+        now = System.currentTimeMillis(),
+        actionTargets = state.visionMetrics.actionTargets,
+        freeAttemptState = state.visionMetrics.freeAttemptState,
+        dailyAlreadySuccess = false,
+    )
+
+    private suspend fun awaitStablePage(expected: Set<String>, timeoutMs: Long): String? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            mutableUiState.value.visionMetrics.stablePage?.pageId?.let { if (it in expected) return it }
+            delay(250)
+        }
+        return null
+    }
+
+    private fun logAction(logger: RunLogger, intent: ActionIntent, execution: ActionExecution, retryIndex: Int) {
+        val allow = execution.decision as? GuardDecision.AllowDryRun
+        logger.action(mapOf(
+            "ActionIntent" to intent.type.name,
+            "policy" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.riskLevel?.name,
+            "pageBefore" to allow?.plan?.expectedPageBefore,
+            "targetId" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.requiredTargetId,
+            "targetRect" to allow?.plan?.targetRect?.toString(),
+            "GuardDecision" to execution.decision::class.simpleName,
+            "tapResult" to execution.tapResult,
+            "expectedPostcondition" to allow?.plan?.expectedPageAfter?.joinToString(),
+            "pageAfter" to execution.pageAfter,
+            "durationMs" to execution.durationMs,
+            "retryIndex" to retryIndex,
+            "errorCode" to if (execution.postconditionMet) null else "ACTION_${intent.type.name}_UNVERIFIED",
+        ))
+    }
+
+    private suspend fun persistAndFinishReq0006(
+        logger: RunLogger,
+        dao: com.lidquan.yishigame.data.DailyExecutionDao,
+        runningRecord: DailyExecutionEntity,
+        result: String,
+        error: String?,
+    ) {
+        dao.upsert(runningRecord.copy(
+            status = result,
+            finishedAt = System.currentTimeMillis(),
+            resultCode = result,
+            errorCode = error,
+        ))
+        finishReq0006(logger, result, error)
+    }
+
+    private fun finishReq0006(logger: RunLogger, result: String, error: String?) {
+        req0006State = result
+        req0006Error = error
+        logger.finish(result, error)
+        record("REQ-0006", result, error)
+        refresh()
     }
 
     private fun record(eventType: String, result: String, errorCode: String? = null) {
@@ -359,5 +607,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val contentViewportRightKey = "content_viewport_right"
         private const val contentViewportBottomKey = "content_viewport_bottom"
         private const val contentViewportProfileVersionKey = "content_viewport_profile_version"
+        private const val req0006TimeoutMillis = 10 * 60_000L
+        private const val req0006MaxActions = 20
+        private const val req0006TargetArea = "亡灵之地"
     }
 }

@@ -3,6 +3,8 @@ package com.lidquan.yishigame.vision
 import com.lidquan.yishigame.capture.FrameStore
 import com.lidquan.yishigame.capture.ScreenFrameSnapshot
 import com.lidquan.yishigame.vision.page.StablePageTracker
+import com.lidquan.yishigame.automation.AutoBattleState
+import com.lidquan.yishigame.vision.ocr.CounterValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +23,11 @@ data class VisionAnalysis(
     val ocrDurationMs: Long = 0,
     val pageDetectorDurationMs: Long = 0,
     val actionTargets: List<ActionTargetEvidence> = emptyList(),
+    val progress: CounterValue? = null,
+    val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+    val currentMap: String? = null,
+    val currentDungeon: String? = null,
+    val evidenceIds: List<String> = emptyList(),
 )
 
 class VisionWorker(
@@ -67,6 +74,11 @@ class VisionWorker(
                         stablePage = stable,
                         freeAttemptState = result.freeAttemptState,
                         actionTargets = result.actionTargets.associate { it.id to it.rect },
+                        progress = result.progress,
+                        autoBattleState = result.autoBattleState,
+                        currentMap = result.currentMap,
+                        currentDungeon = result.currentDungeon,
+                        evidenceIds = result.evidenceIds,
                     )
                     lastFrameId = frame.frameId
                 }

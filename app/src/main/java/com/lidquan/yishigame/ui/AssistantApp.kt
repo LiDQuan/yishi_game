@@ -114,6 +114,7 @@ fun AssistantApp(
                     StatusRow("OCR / Page", "${state.visionMetrics.ocrDurationMs} / ${state.visionMetrics.pageDetectorDurationMs} ms")
                     StatusRow("Detection", detectionLabel(state.visionMetrics.pageDetection))
                     StatusRow("StablePage", state.visionMetrics.stablePage?.let { "${it.pageId} · %.3f".format(it.confidence) } ?: "无")
+                    StatusRow("Evidence", state.visionMetrics.evidenceIds.joinToString().ifEmpty { "无" })
                     StatusRow("FreeAttempt", state.visionMetrics.freeAttemptState.name)
                     StatusRow("Action Guard", guardLabel(state.dryRunDecision))
                     Button(onClick = viewModel::evaluateDungeonAnchorDryRun, modifier = Modifier.fillMaxWidth()) {
@@ -131,7 +132,7 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("异世界勇者自动化助手", style = MaterialTheme.typography.headlineMedium)
-            Text("M1 视觉基础设施验证版，只识别与 Dry-Run，不执行游戏输入。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("REQ-0006 单角色单副本受控验证版。所有输入必须通过 Action Guard。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             StatusRow("当前状态", state.automationState.name)
             StatusRow("辅助功能", if (state.accessibilityEnabled) "已启用" else "未启用")
             StatusRow("屏幕采集", captureLabel(state.captureState))
@@ -146,6 +147,8 @@ private fun Overview(state: EnvironmentUiState, modifier: Modifier) {
             )
             StatusRow("窗口检测", state.windowBounds?.let { "${it.width} × ${it.height} · ${state.windowGate}" } ?: state.windowGate.name)
             StatusRow("设备摘要", state.deviceSummary)
+            StatusRow("REQ-0006", state.req0006Error?.let { "${state.req0006State} · $it" } ?: state.req0006State)
+            state.req0006SessionId?.let { StatusRow("Session", it) }
         }
     }
 }
@@ -179,10 +182,10 @@ private fun Controls(
             ) { Text("请求并验证屏幕采集") }
             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
             Button(
-                onClick = viewModel::beginPlaceholder,
+                onClick = viewModel::beginReq0006,
                 enabled = state.canArmPlaceholder,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("准备启动（M0 占位）") }
+            ) { Text("开始 REQ-0006 受控运行") }
             if (state.automationState == AutomationState.WAIT_TARGET_ACTIVE) {
                 Text("握手第 2 阶段：请切回游戏窗口；只有窗口、焦点和采集状态均通过检查后才会继续。", color = MaterialTheme.colorScheme.primary)
             }

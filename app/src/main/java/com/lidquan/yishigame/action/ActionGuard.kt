@@ -8,7 +8,13 @@ import com.lidquan.yishigame.viewport.ScreenPoint
 import com.lidquan.yishigame.vision.FreeAttemptState
 import com.lidquan.yishigame.vision.StablePage
 
-enum class ActionType { OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, OPEN_DUNGEON, START_DUNGEON_FREE, CLOSE_SAFE_DIALOG, PURCHASE }
+enum class ActionType {
+    OPEN_SETTINGS, RETURN_CHARACTER_SELECT, SELECT_ROLE, ENTER_GAME,
+    OPEN_DUNGEON,
+    OPEN_AREA_MAP, OPEN_AREA_SWITCH, SELECT_AREA, OPEN_DUNGEON_LIST,
+    SELECT_DUNGEON, START_DUNGEON_FREE, ENABLE_AUTO_BATTLE,
+    CLOSE_SAFE_DIALOG, PURCHASE,
+}
 enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
 enum class GuardDenyReason { POLICY_MISSING, AUTOMATION_NOT_RUNNING, ACCESSIBILITY_UNAVAILABLE, CAPTURE_INACTIVE, TARGET_NOT_VISIBLE, TARGET_NOT_ACTIVE, WINDOW_NOT_MATCHED, VIEWPORT_INVALID, PAGE_NOT_STABLE, PAGE_VIEWPORT_MISMATCH, PAGE_STALE, PAGE_NOT_ALLOWED, TARGET_NOT_CONFIRMED, TARGET_OUTSIDE_VIEWPORT, FREE_STATE_NOT_CONFIRMED, DAILY_ALREADY_SUCCESS, PURCHASE_SIGNAL_PRESENT, FORBIDDEN_AUTO }
 
@@ -24,9 +30,16 @@ object ActionPolicyRegistry {
         ActionType.OPEN_SETTINGS to ActionPolicy(RiskLevel.SAFE, setOf("MAIN"), "main.settings", setOf("SETTINGS")),
         ActionType.RETURN_CHARACTER_SELECT to ActionPolicy(RiskLevel.NORMAL, setOf("SETTINGS"), "settings.return_character", setOf("CHARACTER_SELECT")),
         ActionType.SELECT_ROLE to ActionPolicy(RiskLevel.NORMAL, setOf("CHARACTER_SELECT"), "character.role", setOf("CHARACTER_SELECT")),
+        ActionType.ENTER_GAME to ActionPolicy(RiskLevel.NORMAL, setOf("CHARACTER_SELECT"), "character.enter", setOf("HOME", "LOADING")),
         ActionType.OPEN_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.switch_region", setOf("DUNGEON_LIST")),
-        ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("LOADING")),
-        ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("DUNGEON_LIST")),
+        ActionType.OPEN_AREA_MAP to ActionPolicy(RiskLevel.NORMAL, setOf("HOME"), "home.dungeon", setOf("AREA_MAP")),
+        ActionType.OPEN_AREA_SWITCH to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_MAP"), "area.switch", setOf("AREA_PICKER")),
+        ActionType.SELECT_AREA to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_PICKER"), "area.target", setOf("AREA_MAP")),
+        ActionType.OPEN_DUNGEON_LIST to ActionPolicy(RiskLevel.NORMAL, setOf("AREA_MAP"), "area.dungeon", setOf("DUNGEON_LIST")),
+        ActionType.SELECT_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.candidate", setOf("DUNGEON_DETAIL")),
+        ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("BATTLE", "LOADING")),
+        ActionType.ENABLE_AUTO_BATTLE to ActionPolicy(RiskLevel.NORMAL, setOf("BATTLE"), "battle.auto", setOf("BATTLE")),
+        ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("CHARACTER_SELECT", "HOME", "AREA_MAP")),
         ActionType.PURCHASE to ActionPolicy(RiskLevel.FORBIDDEN_AUTO, emptySet(), "purchase.confirm", emptySet()),
     )
 
@@ -96,9 +109,9 @@ object ActionGuard {
                 ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
                 page.pageId,
                 policy.expectedPagesAfter,
-                5_000L,
+                if (intent.type == ActionType.SELECT_AREA) 30_000L else 15_000L,
             ),
-            listOf("ALL_PRECONDITIONS_CONFIRMED", "DRY_RUN_ONLY"),
+            listOf("ALL_PRECONDITIONS_CONFIRMED"),
         )
     }
 

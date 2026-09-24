@@ -26,6 +26,7 @@ interface DungeonDao {
 
 @Dao
 interface DailyExecutionDao {
+    @Upsert suspend fun upsert(execution: DailyExecutionEntity)
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIfAbsent(execution: DailyExecutionEntity): Long
     @Query("SELECT * FROM daily_executions WHERE gameDayKey = :gameDayKey ORDER BY startedAt")
