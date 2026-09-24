@@ -183,7 +183,6 @@ private fun Controls(
             Button(onClick = viewModel::runEnvironmentCheck, modifier = Modifier.fillMaxWidth()) { Text("环境检查") }
             Button(
                 onClick = viewModel::beginReq0006,
-                enabled = state.canArmPlaceholder,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("开始 REQ-0006 受控运行") }
             if (state.automationState == AutomationState.WAIT_TARGET_ACTIVE) {

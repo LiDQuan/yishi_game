@@ -214,7 +214,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 assistantWindow = assistantWindow?.bounds,
                 windowGate = snapshot.windowGate,
                 contentViewport = snapshot.contentViewport,
-                stablePageId = snapshot.visionMetrics.stablePage?.pageId,
+                stablePageId = snapshot.visionMetrics.stablePage
+                    ?.takeIf { it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000 }
+                    ?.pageId,
             ),
         )
         if (precheck is Req0006PrecheckResult.Failed) {
