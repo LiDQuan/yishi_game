@@ -1,1229 +1,144 @@
 diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-index 9eb2022..9adfb07 100644
+index 9adfb07..dc9085c 100644
 --- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-@@ -52,6 +52,9 @@ import kotlinx.coroutines.launch
- import java.text.SimpleDateFormat
- import java.util.Date
- import java.util.Locale
-+import java.util.UUID
-+import java.io.IOException
-+import kotlinx.coroutines.CancellationException
- 
- data class EnvironmentUiState(
-     val automationState: AutomationState = AutomationState.IDLE,
-@@ -107,12 +110,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-     private var req0006Pending = false
-     private var req0006Job: Job? = null
-     private var req0006SessionId: String? = null // public-scan: allow - runtime ID, not a credential
-+    private var req0006Logger: RunLogger? = null
-+    private var req0006PrecheckJob: Job? = null
-     private var req0006State: String = "IDLE"
-     private var req0006Error: String? = null
-     private val mutableUiState = MutableStateFlow(EnvironmentUiState(deviceSummary = deviceSummary()))
-     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
- 
-     init {
-+        RunLogger.finalizeOrphanedSessions(appContext)
-         viewModelScope.launch { stateMachine.state.collect { refresh() } }
-         viewModelScope.launch { captureController.state.collect { refresh() } }
-         viewModelScope.launch { captureController.frameStore.metadata.collect { refresh() } }
-@@ -192,38 +198,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
- 
-     fun beginReq0006() {
-         refresh()
--        if (req0006Job?.isActive == true) {
-+        if (req0006Job?.isActive == true || req0006PrecheckJob?.isActive == true || req0006Pending) {
-             record("REQ-0006", "BLOCKED", "ALREADY_RUNNING")
-             return
-         }
--        val snapshot = mutableUiState.value
--        val service = GameAccessibilityService.instance
--        val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
--        val windows = service?.queryWindows().orEmpty()
--        val gameWindow = windows
--            .filter { configuredPackage.isNotBlank() && it.packageName == configuredPackage }
--            .maxByOrNull { it.layer }
--        val assistantWindow = windows
--            .filter { it.packageName == appContext.packageName }
--            .maxByOrNull { it.layer }
--        val precheck = Req0006Precheck.evaluate(
--            Req0006PrecheckInput(
--                accessibilityEnabled = snapshot.accessibilityEnabled,
--                captureActive = snapshot.captureState is ScreenCaptureState.Active,
--                gameWindow = gameWindow?.bounds,
--                assistantWindow = assistantWindow?.bounds,
--                windowGate = snapshot.windowGate,
--                contentViewport = snapshot.contentViewport,
--                stablePageId = snapshot.visionMetrics.stablePage
--                    ?.takeIf { it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000 }
--                    ?.pageId,
--            ),
--        )
-+        val logger = runCatching { RunLogger(appContext) }.getOrElse {
-+            req0006State = "PRECHECK_FAILED"
-+            req0006Error = "RUN_LOG_UNAVAILABLE"
-+            record("REQ-0006", "FAILED", "RUN_LOG_UNAVAILABLE")
-+            refresh()
-+            return
-+        }
-+        req0006Logger?.takeIf { !it.isEnded }?.end(req0006State, stateMachine.state.value.name, "CANCELLED", "SUPERSEDED")
-+        req0006Logger = logger
-+        req0006SessionId = logger.sessionId // public-scan: allow - runtime ID, not a credential
-+        try {
-+            logger.start(mapOf("appVersion" to appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName))
-+            logger.event("PRECHECK_START", "PRECHECK", stateMachine.state.value.name)
-+        } catch (_: Exception) {
-+            req0006State = "PRECHECK_FAILED"
-+            req0006Error = "RUN_LOG_UNAVAILABLE"
-+            record("REQ-0006", "FAILED", req0006Error)
-+            refresh()
-+            return
-+        }
-+        req0006PrecheckJob = viewModelScope.launch {
-+            try { performReq0006Precheck(logger) }
-+            catch (cancelled: CancellationException) { throw cancelled }
-+            catch (_: Exception) {
-+                req0006Pending = false
-+                req0006State = "PRECHECK_FAILED"
-+                req0006Error = "RUN_LOG_UNAVAILABLE"
-+                record("REQ-0006", "FAILED", req0006Error)
-+            }
-+            finally { if (!logger.isEnded && !req0006Pending) runCatching { logger.end(req0006State, stateMachine.state.value.name,
-+                if (req0006State == "PRECHECK_FAILED") "FAILED" else "CANCELLED", req0006Error ?: "PRECHECK_INTERRUPTED",
-+                mapOf("finalStablePage" to mutableUiState.value.visionMetrics.stablePage?.pageId)) } }
-+        }
-+    }
-+
-+    private suspend fun performReq0006Precheck(logger: RunLogger) {
-+        val deadline = System.nanoTime() / 1_000_000L + 5_000L
-+        var precheck: Req0006PrecheckResult
-+        lateinit var snapshot: EnvironmentUiState
-+        var gameWindowFound = false
-+        var assistantWindowFound = false
-+        var gameBounds: WindowBounds? = null
-+        var assistantBounds: WindowBounds? = null
-+        do {
-+            refresh()
-+            snapshot = mutableUiState.value
-+            val service = GameAccessibilityService.instance
-+            val configuredPackage = preferences.getString(targetPackageKey, "").orEmpty()
-+            val windows = service?.queryWindows().orEmpty()
-+            val gameWindow = windows
-+                .filter { configuredPackage.isNotBlank() && it.packageName == configuredPackage }
-+                .maxByOrNull { it.layer }
-+            val assistantWindow = windows
-+                .filter { it.packageName == appContext.packageName }
-+                .maxByOrNull { it.layer }
-+            gameWindowFound = gameWindow != null
-+            assistantWindowFound = assistantWindow != null
-+            gameBounds = gameWindow?.bounds
-+            assistantBounds = assistantWindow?.bounds
-+            precheck = Req0006Precheck.evaluate(
-+                Req0006PrecheckInput(
-+                    accessibilityEnabled = snapshot.accessibilityEnabled,
-+                    captureActive = snapshot.captureState is ScreenCaptureState.Active,
-+                    gameWindow = gameWindow?.bounds,
-+                    assistantWindow = assistantWindow?.bounds,
-+                    windowGate = snapshot.windowGate,
-+                    contentViewport = snapshot.contentViewport,
-+                    stablePageId = snapshot.visionMetrics.stablePage
-+                        ?.takeIf { it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000 }
-+                        ?.pageId,
-+                ),
-+            )
-+            if (precheck is Req0006PrecheckResult.Failed && precheck.reason == com.lidquan.yishigame.automation.Req0006PrecheckFailure.GAME_PAGE_NOT_STABLE && System.nanoTime() / 1_000_000L < deadline) {
-+                delay(250)
-+                continue
-+            }
-+            break
-+        } while (true)
-+        val stablePage = snapshot.visionMetrics.stablePage?.takeIf {
-+            it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000
-+        }
-+        val layoutValid = gameBounds != null && assistantBounds != null &&
-+            Req0006Precheck.isGameLeftAssistantRight(gameBounds, assistantBounds)
-+        listOf(
-+            "ACCESSIBILITY" to snapshot.accessibilityEnabled,
-+            "CAPTURE" to (snapshot.captureState is ScreenCaptureState.Active),
-+            "GAME_WINDOW" to gameWindowFound,
-+            "ASSISTANT_WINDOW" to assistantWindowFound,
-+            "WINDOW_GATE" to (snapshot.windowGate == WindowGate.MATCHED),
-+            "CONTENT_VIEWPORT" to (snapshot.contentViewport?.isValid == true),
-+            "LAYOUT" to layoutValid,
-+            "STABLE_PAGE" to (stablePage != null),
-+            "HOME" to (stablePage?.pageId == "HOME"),
-+        ).forEach { (check, passed) -> logger.event("PRECHECK_CHECK", "PRECHECK", stateMachine.state.value.name,
-+            if (passed) "PASS" else "FAIL", values = mapOf("check" to check)) }
-+        logger.event("PRECHECK_CHECKS", "PRECHECK", stateMachine.state.value.name,
-+            result = if (precheck is Req0006PrecheckResult.Ready) "READY" else "FAILED",
-+            errorCode = (precheck as? Req0006PrecheckResult.Failed)?.reason?.name,
-+            values = mapOf("accessibility" to snapshot.accessibilityEnabled, "capture" to (snapshot.captureState is ScreenCaptureState.Active),
-+                "gameWindow" to gameWindowFound, "assistantWindow" to assistantWindowFound, "windowGate" to snapshot.windowGate.name,
-+                "viewportConfirmed" to (snapshot.contentViewport?.isValid == true), "stablePage" to snapshot.visionMetrics.stablePage?.pageId))
-         if (precheck is Req0006PrecheckResult.Failed) {
-             val error = "PRECHECK_" + precheck.reason.name
-             req0006State = "PRECHECK_FAILED"
-             req0006Error = error
-             record("REQ-0006_PRECHECK", "FAILED", error)
-+            logger.event("PRECHECK_FAILED", "PRECHECK_FAILED", stateMachine.state.value.name, "FAILED", error)
-+            logger.end("PRECHECK_FAILED", stateMachine.state.value.name, "FAILED", error)
-             refresh()
-             return
-         }
-@@ -231,15 +317,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-             req0006State = "PRECHECK_FAILED"
-             req0006Error = "PRECHECK_ENVIRONMENT_NOT_READY"
-             record("REQ-0006_PRECHECK", "FAILED", "PRECHECK_ENVIRONMENT_NOT_READY")
-+            logger.event("PRECHECK_FAILED", "PRECHECK_FAILED", stateMachine.state.value.name, "FAILED", "PRECHECK_ENVIRONMENT_NOT_READY")
-+            logger.end("PRECHECK_FAILED", stateMachine.state.value.name, "FAILED", "PRECHECK_ENVIRONMENT_NOT_READY")
-             refresh()
-             return
-         }
-         record("REQ-0006_PRECHECK", "READY")
-+        logger.event("PRECHECK_READY", "WAIT_TARGET_ACTIVE", stateMachine.state.value.name, "READY")
-         req0006Pending = true
-         req0006State = "WAIT_TARGET_ACTIVE"
-         req0006Error = null
--        req0006SessionId = null
-         beginPlaceholder()
-+        if (stateMachine.state.value != AutomationState.WAIT_TARGET_ACTIVE) {
-+            logger.end("PRECHECK_FAILED", stateMachine.state.value.name, "FAILED", "TARGET_HANDSHAKE_NOT_ARMED")
-+            req0006Pending = false
-+        }
-         refresh()
-     }
- 
-@@ -261,14 +353,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-             delay(targetActivationTimeoutMillis)
-             if (stateMachine.dispatch(AutomationEvent.TargetActivationTimedOut)) {
-                 record("AUTOMATION_PLACEHOLDER", "PAUSED", "TARGET_ACTIVATION_TIMEOUT")
-+                if (req0006Pending) {
-+                    req0006Pending = false
-+                    req0006State = "FAILED"
-+                    req0006Error = "TARGET_ACTIVATION_TIMEOUT"
-+                    req0006Logger?.end(req0006State, stateMachine.state.value.name, "FAILED", req0006Error)
-+                }
-             }
-         }
-     }
- 
-     fun stop() {
-         targetActivationTimeout?.cancel()
-+        val precheckWasActive = req0006PrecheckJob?.isActive == true
-+        val runWasActive = req0006Job?.isActive == true
-+        req0006PrecheckJob?.cancel()
-         req0006Job?.cancel()
-         req0006Pending = false
-+        if (!precheckWasActive && !runWasActive) req0006Logger?.takeIf { !it.isEnded }
-+            ?.end(req0006State, stateMachine.state.value.name, "CANCELLED", "USER_STOPPED",
-+                mapOf("finalStablePage" to mutableUiState.value.visionMetrics.stablePage?.pageId))
-         stateMachine.dispatch(AutomationEvent.Stop)
-         captureController.stop()
-         visionWorker.invalidate()
-@@ -362,7 +466,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         }
-         if (req0006Pending && stateMachine.state.value == AutomationState.RUNNING_PLACEHOLDER && req0006Job?.isActive != true) {
-             req0006Pending = false
--            req0006Job = viewModelScope.launch { runReq0006() }
-+            val logger = req0006Logger
-+            if (logger != null && !logger.isEnded) req0006Job = viewModelScope.launch {
-+                try { runReq0006(logger) }
-+                catch (cancelled: CancellationException) { throw cancelled }
-+                catch (failure: Exception) {
-+                    val error = if (failure is IOException || failure.message == "RUN_LOG_UNAVAILABLE") "RUN_LOG_UNAVAILABLE" else "RUN_INTERNAL_ERROR"
-+                    req0006State = "FAILED"
-+                    req0006Error = error
-+                    runCatching { logger.event("RUN_FAILED", "FAILED", stateMachine.state.value.name, "FAILED", error) }
-+                    record("REQ-0006", "FAILED", error)
-+                }
-+                finally { runCatching { logger.end(req0006State, stateMachine.state.value.name,
-+                    if (req0006State == "FAILED") "FAILED" else "CANCELLED",
-+                    req0006Error ?: "RUN_INTERRUPTED",
-+                    mapOf("finalStablePage" to mutableUiState.value.visionMetrics.stablePage?.pageId)) } }
-+            }
-+        }
-+        if (req0006Pending && stateMachine.state.value in setOf(AutomationState.PAUSED, AutomationState.ERROR, AutomationState.STOPPED)) {
-+            req0006Pending = false
-+            req0006State = "FAILED"
-+            req0006Error = "ENVIRONMENT_CHANGED"
-+            runCatching { req0006Logger?.end(req0006State, stateMachine.state.value.name, "FAILED", req0006Error,
-+                mapOf("finalStablePage" to mutableUiState.value.visionMetrics.stablePage?.pageId)) }
-         }
-         val priorInput = mutableUiState.value.targetPackageInput
-         val refreshed = EnvironmentUiState(
-@@ -388,20 +514,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         mutableUiState.value = refreshed.copy(dryRunDecision = dungeonAnchorDryRun(refreshed))
-     }
- 
--    private suspend fun runReq0006() {
--        val logger = RunLogger(appContext)
--        logger.start(mapOf(
--            "startedAt" to System.currentTimeMillis(),
--            "currentRoleKey" to "current-role",
--            "appVersion" to appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName,
--        ))
--        req0006SessionId = logger.sessionId // public-scan: allow - runtime ID, not a credential
-+    private suspend fun runReq0006(logger: RunLogger) {
-         req0006State = "STARTED"
-         val dao = AppDatabase.get(appContext).dailyExecutionDao()
-         val dayKey = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
-+        // ponytail: single configured role/dungeon only; replace this key before multi-dungeon scheduling.
-         val dailyId = "${dayKey}:current-role:first-free-dungeon"
-         val prior = dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon")
-+        logger.event("DAILY_EXECUTION_LOOKUP", "STARTED", stateMachine.state.value.name, "OK",
-+            values = mapOf("businessKey" to "current-role:first-free-dungeon", "priorStatus" to prior?.status))
-         if (prior?.status == "SUCCESS") {
-+            logger.event("DAILY_EXECUTION_SKIPPED", "SKIPPED", stateMachine.state.value.name, "SKIPPED",
-+                values = mapOf("businessKey" to "current-role:first-free-dungeon"))
-             finishReq0006(logger, "SKIPPED", "DAILY_ALREADY_SUCCESS")
-             return
-         }
-@@ -410,6 +534,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-             targetId = "first-free-dungeon", status = "RUNNING", attemptCount = (prior?.attemptCount ?: 0) + 1,
-             startedAt = System.currentTimeMillis(),
-         ))
-+        logger.event("DAILY_EXECUTION_RUNNING", "STARTED", stateMachine.state.value.name, "RUNNING")
-         val runningRecord = requireNotNull(dao.findDaily(dayKey, "current-role", "DUNGEON", "first-free-dungeon"))
-         val controller = GameAccessibilityService.instance
-         if (controller == null) {
-@@ -423,6 +548,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         var dungeonCompleted = false
-         var enteredBattle = false
-         var areaSelectionIssued = false
-+        var reconnectAttempts = 0
-+        var sellAttempts = 0
-+        var disconnectDetectedAt = 0L
-+        var inventoryDetectedAt = 0L
-+        var progressBeforeRecovery: Int? = null
-         val deadline = System.currentTimeMillis() + req0006TimeoutMillis
-         while (System.currentTimeMillis() < deadline && actions < req0006MaxActions) {
-             if (stateMachine.state.value != AutomationState.RUNNING_PLACEHOLDER) {
-@@ -430,7 +560,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-                 return
-             }
-             val snapshot = mutableUiState.value
--            val page = snapshot.visionMetrics.stablePage?.pageId
-+            val page = snapshot.visionMetrics.stablePage?.takeIf {
-+                it.viewportVersion == windowMonitor.version && System.currentTimeMillis() - it.observedAt in 0..2_000
-+            }?.pageId
-             val progress = snapshot.visionMetrics.progress
-             req0006State = page ?: "WAIT_STABLE_PAGE"
-             logger.state(mapOf(
-@@ -440,17 +572,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-                 "currentMap" to snapshot.visionMetrics.currentMap,
-                 "currentDungeon" to snapshot.visionMetrics.currentDungeon,
-                 "freeAttemptState" to snapshot.visionMetrics.freeAttemptState.name,
-+                "freeCurrent" to snapshot.visionMetrics.freeAttempts?.current,
-+                "freeTotal" to snapshot.visionMetrics.freeAttempts?.total,
-+                "viewportVersion" to snapshot.visionMetrics.stablePage?.viewportVersion,
-+                "pageDetection" to snapshot.visionMetrics.pageDetection.javaClass.simpleName,
+@@ -576,6 +576,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                 "freeTotal" to snapshot.visionMetrics.freeAttempts?.total,
+                 "viewportVersion" to snapshot.visionMetrics.stablePage?.viewportVersion,
+                 "pageDetection" to snapshot.visionMetrics.pageDetection.javaClass.simpleName,
++                "visionConfidence" to snapshot.visionMetrics.stablePage?.confidence,
++                "visionCandidates" to diagnosticCandidates(snapshot.visionMetrics),
++                "ocr" to diagnosticOcr(snapshot.visionMetrics),
                  "progressCurrent" to progress?.current,
                  "progressTotal" to progress?.total,
                  "autoBattleState" to snapshot.visionMetrics.autoBattleState.name,
-             ))
-+            val priorBusinessState = previousBusinessState
-             previousBusinessState = req0006State
--            if (progress?.current != null && progress.current != lastProgressCurrent) lastProgressCurrent = progress.current
-+            if (page == "BATTLE" && progress?.current != null && progress.current != lastProgressCurrent) {
-+                logger.event("BATTLE_PROGRESS", "BATTLE", stateMachine.state.value.name, "OBSERVED",
-+                    values = mapOf("current" to progress.current, "total" to progress.total))
-+                lastProgressCurrent = progress.current
+@@ -766,9 +769,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         while (System.nanoTime() / 1_000_000L < deadline) {
+             val state = mutableUiState.value
+             val page = state.visionMetrics.stablePage
++            val blockers = buildList {
++                if (page == null || page.pageId !in expected) add("EXPECTED_PAGE_NOT_STABLE")
++                if (page != null && page.observedAt < afterTap) add("PAGE_PREDATES_TAP")
++                if (page != null && page.viewportVersion != windowMonitor.version) add("VIEWPORT_VERSION_CHANGED")
++                if (state.windowGate != WindowGate.MATCHED || !state.targetActive) add("WINDOW_NOT_ACTIVE_OR_MATCHED")
++                if (intent == ActionType.SELECT_AREA && state.visionMetrics.currentMap != req0006TargetArea) add("TARGET_MAP_UNCONFIRMED")
 +            }
-             if (page == "BATTLE") {
-                 enteredBattle = true
-                 if (progress != null && progress.current == progress.total) dungeonCompleted = true
-             }
-             val intent = when (page) {
-+                "NETWORK_DISCONNECTED" -> {
-+                    if (disconnectDetectedAt == 0L) {
-+                        disconnectDetectedAt = System.currentTimeMillis()
-+                        progressBeforeRecovery = progress?.current
-+                        logger.event("NETWORK_DISCONNECTED", page, stateMachine.state.value.name, "DETECTED",
-+                            values = mapOf("disconnectDetectedAt" to disconnectDetectedAt, "pageBeforeDisconnect" to priorBusinessState,
-+                                "businessStateBeforeDisconnect" to priorBusinessState, "progressBefore" to progressBeforeRecovery))
-+                    }
-+                    if (reconnectAttempts >= 2) {
-+                        logger.event("SERVER_RECONNECT_FAILED", page, stateMachine.state.value.name, "FAILED", "SERVER_RECONNECT_FAILED")
-+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "SERVER_RECONNECT_FAILED")
-+                        return
-+                    }
-+                    reconnectAttempts++
-+                    logger.event("RECONNECT_ATTEMPT", page, stateMachine.state.value.name, "STARTED",
-+                        values = mapOf("attemptIndex" to reconnectAttempts, "maxAttempts" to 2,
-+                            "disconnectDetectedAt" to disconnectDetectedAt, "progressBefore" to progressBeforeRecovery))
-+                    ActionIntent(ActionType.RECONNECT_GAME)
-+                }
-+                "INVENTORY_FULL" -> {
-+                    if (inventoryDetectedAt == 0L) {
-+                        inventoryDetectedAt = System.currentTimeMillis()
-+                        logger.event("INVENTORY_FULL_DETECTED", page, stateMachine.state.value.name, "DETECTED",
-+                            values = mapOf("pageBefore" to priorBusinessState, "businessStateBefore" to priorBusinessState))
-+                    }
-+                    if (sellAttempts >= 2) {
-+                        logger.event("AUTO_SELL_UNVERIFIED", page, stateMachine.state.value.name, "FAILED", "AUTO_SELL_UNVERIFIED")
-+                        persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AUTO_SELL_UNVERIFIED")
-+                        return
-+                    }
-+                    sellAttempts++
-+                    logger.event("AUTO_SELL_INTENT", page, stateMachine.state.value.name, "STARTED",
-+                        values = mapOf("retryIndex" to sellAttempts, "maxAttempts" to 2))
-+                    ActionIntent(ActionType.AUTO_SELL_INVENTORY)
-+                }
-                 "SAFE_DIALOG" -> {
-                     persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "GAME_DIALOG_REQUIRES_USER")
-                     return
-@@ -458,6 +634,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-                 "CHARACTER_SELECT" -> ActionIntent(ActionType.ENTER_GAME)
-                 "HOME" -> {
-                     if (dungeonCompleted) {
-+                        logger.event("RETURN_HOME_CONFIRMED", "HOME", stateMachine.state.value.name, "CONFIRMED",
-+                            values = mapOf("stablePage" to page))
-+                        logger.event("DAILY_EXECUTION_SUCCESS", "HOME", stateMachine.state.value.name, "SUCCESS")
-                         dao.upsert(runningRecord.copy(status = "SUCCESS", finishedAt = System.currentTimeMillis(), resultCode = "SUCCESS", errorCode = null))
-                         finishReq0006(logger, "SUCCESS", null)
-                         return
-@@ -509,9 +688,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-                     continue
-                 }
-             }
--            val execution = executor.execute(intent, actionContext(snapshot)) { expected, timeout -> awaitStablePage(expected, timeout) }
-+            val actionId = UUID.randomUUID().toString()
-+            val execution = executeLoggedAction(logger, executor, intent, snapshot, actions + 1, actionId)
-             actions++
--            logAction(logger, intent, execution, actions)
-+            if (intent.type == ActionType.START_DUNGEON_FREE && execution.tapResult == true) enteredBattle = true
-+            if (intent.type == ActionType.RECONNECT_GAME) {
-+                logger.event("RECONNECT_ACTION", page ?: "UNKNOWN", stateMachine.state.value.name,
-+                    if (execution.tapResult == true) "DISPATCHED" else "BLOCKED", values = mapOf("attemptIndex" to reconnectAttempts, "actionId" to actionId))
-+                logger.event("RECONNECT_WAIT", page ?: "UNKNOWN", stateMachine.state.value.name,
-+                    if (execution.postconditionMet) "RECOVERED" else "UNVERIFIED",
-+                    values = mapOf("recoveredPage" to execution.pageAfter, "actionId" to actionId))
-+                if (execution.postconditionMet) {
-+                    logger.event("NETWORK_RECOVERED", execution.pageAfter ?: "UNKNOWN", stateMachine.state.value.name, "RECOVERED",
-+                        values = mapOf("disconnectDetectedAt" to disconnectDetectedAt, "attemptIndex" to reconnectAttempts,
-+                            "maxAttempts" to 2, "recoveredPage" to execution.pageAfter,
-+                            "recoveryDurationMs" to (System.currentTimeMillis() - disconnectDetectedAt),
-+                            "progressBefore" to progressBeforeRecovery, "progressAfter" to mutableUiState.value.visionMetrics.progress?.current))
-+                    disconnectDetectedAt = 0L
-+                    reconnectAttempts = 0
-+                    continue
-+                }
-+                if (execution.decision is GuardDecision.Deny || execution.tapResult != true) {
-+                    persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "SERVER_RECONNECT_FAILED")
-+                    return
-+                }
-+                continue
-+            }
-+            if (intent.type == ActionType.AUTO_SELL_INVENTORY) {
-+                logger.event("AUTO_SELL_POSTCONDITION", page ?: "UNKNOWN", stateMachine.state.value.name,
-+                    if (execution.postconditionMet) "CONFIRMED" else "UNVERIFIED",
-+                    values = mapOf("dialogGone" to execution.postconditionMet, "pageAfter" to execution.pageAfter,
-+                        "retryIndex" to sellAttempts, "actionId" to actionId))
-+                if (execution.postconditionMet) {
-+                    logger.event("INVENTORY_RECOVERED", execution.pageAfter ?: "UNKNOWN", stateMachine.state.value.name, "RECOVERED",
-+                        values = mapOf("recoveryDurationMs" to (System.currentTimeMillis() - inventoryDetectedAt),
-+                            "pageAfter" to execution.pageAfter))
-+                    inventoryDetectedAt = 0L
-+                    sellAttempts = 0
-+                    continue
-+                }
-+                if (execution.decision is GuardDecision.Deny || execution.tapResult != true) {
-+                    persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "AUTO_SELL_UNVERIFIED")
-+                    return
-+                }
-+                continue
-+            }
-+            if (execution.tapResult == true && !execution.postconditionMet &&
-+                mutableUiState.value.visionMetrics.stablePage?.pageId in setOf("NETWORK_DISCONNECTED", "INVENTORY_FULL")) continue
-             if (execution.decision is GuardDecision.Deny || execution.tapResult != true || !execution.postconditionMet) {
-                 persistAndFinishReq0006(logger, dao, runningRecord, "FAILED", "ACTION_${intent.type.name}_BLOCKED_OR_UNVERIFIED")
-                 return
-@@ -537,31 +760,94 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         dailyAlreadySuccess = false,
-     )
- 
--    private suspend fun awaitStablePage(expected: Set<String>, timeoutMs: Long): String? {
--        val deadline = System.currentTimeMillis() + timeoutMs
--        while (System.currentTimeMillis() < deadline) {
--            mutableUiState.value.visionMetrics.stablePage?.pageId?.let { if (it in expected) return it }
-+    private suspend fun awaitStablePage(expected: Set<String>, timeoutMs: Long, afterTap: Long, intent: ActionType, logger: RunLogger, actionId: String): String? {
-+        val deadline = System.nanoTime() / 1_000_000L + timeoutMs
-+        var lastEvidence: Map<String, Any?>? = null
-+        while (System.nanoTime() / 1_000_000L < deadline) {
-+            val state = mutableUiState.value
-+            val page = state.visionMetrics.stablePage
-+            val evidence = mapOf("actionId" to actionId, "stablePage" to page?.pageId,
-+                "currentMap" to state.visionMetrics.currentMap, "viewportVersion" to windowMonitor.version,
-+                "pageDetection" to state.visionMetrics.pageDetection.javaClass.simpleName,
-+                "evidenceIds" to state.visionMetrics.evidenceIds.joinToString())
-+            if (evidence != lastEvidence) {
-+                logger.event("POSTCONDITION_OBSERVATION", req0006State, state.automationState.name, values = evidence)
-+                lastEvidence = evidence
-+            }
-+            if (page != null && page.pageId in expected && page.observedAt >= afterTap &&
-+                state.automationState == AutomationState.RUNNING_PLACEHOLDER && state.targetActive &&
-+                state.windowGate == WindowGate.MATCHED && page.viewportVersion == windowMonitor.version && System.currentTimeMillis() - page.observedAt in 0..2_000 &&
-+                (intent != ActionType.SELECT_AREA || state.visionMetrics.currentMap == req0006TargetArea) &&
-+                (intent != ActionType.ENABLE_AUTO_BATTLE || state.visionMetrics.autoBattleState == AutoBattleState.ON)) return page.pageId
-             delay(250)
-         }
+             val evidence = mapOf("actionId" to actionId, "stablePage" to page?.pageId,
+                 "currentMap" to state.visionMetrics.currentMap, "viewportVersion" to windowMonitor.version,
+                 "pageDetection" to state.visionMetrics.pageDetection.javaClass.simpleName,
++                "visionConfidence" to page?.confidence,
++                "visionCandidates" to diagnosticCandidates(state.visionMetrics),
++                "pageObservedAt" to page?.observedAt,
++                "ocr" to diagnosticOcr(state.visionMetrics),
++                "postconditionBlockers" to blockers,
+                 "evidenceIds" to state.visionMetrics.evidenceIds.joinToString())
+             if (evidence != lastEvidence) {
+                 logger.event("POSTCONDITION_OBSERVATION", req0006State, state.automationState.name, values = evidence)
+@@ -784,6 +799,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          return null
      }
  
--    private fun logAction(logger: RunLogger, intent: ActionIntent, execution: ActionExecution, retryIndex: Int) {
--        val allow = execution.decision as? GuardDecision.AllowDryRun
--        logger.action(mapOf(
--            "ActionIntent" to intent.type.name,
--            "policy" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.riskLevel?.name,
--            "pageBefore" to allow?.plan?.expectedPageBefore,
--            "targetId" to com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)?.requiredTargetId,
--            "targetRect" to allow?.plan?.targetRect?.toString(),
--            "GuardDecision" to execution.decision::class.simpleName,
--            "tapResult" to execution.tapResult,
--            "expectedPostcondition" to allow?.plan?.expectedPageAfter?.joinToString(),
--            "pageAfter" to execution.pageAfter,
--            "durationMs" to execution.durationMs,
--            "retryIndex" to retryIndex,
--            "errorCode" to if (execution.postconditionMet) null else "ACTION_${intent.type.name}_UNVERIFIED",
--        ))
-+    private suspend fun executeLoggedAction(logger: RunLogger, executor: ActionExecutor, intent: ActionIntent,
-+        state: EnvironmentUiState, retryIndex: Int, actionId: String): ActionExecution {
-+        val policy = com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)
-+        val pageBefore = state.visionMetrics.stablePage
-+        val common = mapOf("actionId" to actionId, "actionType" to intent.type.name, "pageBefore" to pageBefore?.pageId,
-+            "stablePageAgeMs" to pageBefore?.let { System.currentTimeMillis() - it.observedAt },
-+            "viewportVersion" to windowMonitor.version, "targetId" to policy?.requiredTargetId,
-+            "policy" to policy?.riskLevel?.name, "ActionIntent" to intent.type.name,
-+            "riskLevel" to policy?.riskLevel?.name, "expectedPostcondition" to policy?.expectedPagesAfter?.joinToString(),
-+            "retryIndex" to retryIndex)
-+        logger.event("ACTION_INTENT", req0006State, stateMachine.state.value.name, "PLANNED", values = common)
-+        var dispatchAt = 0L
-+        var dispatched = false
-+        var finished = false
-+        try {
-+            val execution = executor.execute(intent, actionContext(state),
-+                onGuardDecision = { decision ->
-+                    val allow = decision as? GuardDecision.AllowDryRun
-+                    if (allow != null) dispatchAt = System.currentTimeMillis()
-+                    logger.event("GUARD_DECISION", req0006State, stateMachine.state.value.name,
-+                        if (allow == null) "DENY" else "ALLOW", (decision as? GuardDecision.Deny)?.reason?.name,
-+                        common + mapOf("guardDecision" to (if (allow == null) "DENY" else "ALLOW"),
-+                            "denyReason" to (decision as? GuardDecision.Deny)?.reason?.name,
-+                            "targetRect" to allow?.plan?.targetRect?.toString(), "tapPoint" to allow?.plan?.tapPoint?.toString()))
-+                    if (intent.type == ActionType.AUTO_SELL_INVENTORY) logger.event("AUTO_SELL_GUARD_DECISION", req0006State,
-+                        stateMachine.state.value.name, if (allow == null) "DENY" else "ALLOW",
-+                        (decision as? GuardDecision.Deny)?.reason?.name, common + mapOf("guardDecision" to (if (allow == null) "DENY" else "ALLOW"),
-+                            "targetRect" to allow?.plan?.targetRect?.toString()))
-+                },
-+                onTapDispatched = { plan, accepted ->
-+                    dispatched = accepted
-+                    if (accepted) {
-+                        dispatchAt = System.currentTimeMillis()
-+                        visionWorker.invalidate()
-+                        refresh()
-+                    }
-+                    logger.event("INPUT_DISPATCH", req0006State, stateMachine.state.value.name,
-+                        if (accepted) "ACCEPTED" else "REJECTED", values = common + mapOf(
-+                            "targetRect" to plan.targetRect.toString(), "tapPoint" to plan.tapPoint.toString(),
-+                            "dispatchAccepted" to accepted))
-+                    if (intent.type == ActionType.AUTO_SELL_INVENTORY) logger.event("AUTO_SELL_DISPATCH", req0006State,
-+                        stateMachine.state.value.name, if (accepted) "ACCEPTED" else "REJECTED",
-+                        values = common + mapOf("targetRect" to plan.targetRect.toString(), "dispatchAccepted" to accepted))
-+                },
-+            ) { expected, timeout -> awaitStablePage(expected, timeout, dispatchAt, intent.type, logger, actionId) }
-+            logger.event("POSTCONDITION_RESULT", req0006State, stateMachine.state.value.name,
-+                if (execution.postconditionMet) "CONFIRMED" else "UNVERIFIED",
-+                if (execution.postconditionMet) null else "ACTION_${intent.type.name}_UNVERIFIED",
-+                common + mapOf("pageAfter" to execution.pageAfter, "durationMs" to execution.durationMs))
-+            logger.event("ACTION_FINISH", req0006State, stateMachine.state.value.name,
-+                if (execution.postconditionMet) "SUCCESS" else "FAILED",
-+                if (execution.postconditionMet) null else "ACTION_${intent.type.name}_UNVERIFIED",
-+                common + mapOf("pageAfter" to execution.pageAfter, "durationMs" to execution.durationMs,
-+                    "dispatchAccepted" to execution.tapResult, "tapResult" to execution.tapResult))
-+            finished = true
-+            return execution
-+        } finally {
-+            if (!finished) {
-+                runCatching { logger.event("POSTCONDITION_RESULT", req0006State, stateMachine.state.value.name, "CANCELLED",
-+                    "ACTION_INTERRUPTED", common + mapOf("dispatchAccepted" to dispatched)) }
-+                runCatching { logger.event("ACTION_FINISH", req0006State, stateMachine.state.value.name, "CANCELLED",
-+                    "ACTION_INTERRUPTED", common + mapOf("dispatchAccepted" to dispatched)) }
-+            }
-+        }
-     }
- 
-     private suspend fun persistAndFinishReq0006(
-@@ -571,6 +857,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         result: String,
-         error: String?,
-     ) {
-+        logger.event("DAILY_EXECUTION_FAILED", req0006State, stateMachine.state.value.name, result, error)
-         dao.upsert(runningRecord.copy(
-             status = result,
-             finishedAt = System.currentTimeMillis(),
-@@ -583,7 +870,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-     private fun finishReq0006(logger: RunLogger, result: String, error: String?) {
-         req0006State = result
-         req0006Error = error
--        logger.finish(result, error)
-+        logger.end(req0006State, stateMachine.state.value.name, result, error,
-+            mapOf("finalStablePage" to mutableUiState.value.visionMetrics.stablePage?.pageId))
-+        stateMachine.dispatch(AutomationEvent.RunFinished)
-         record("REQ-0006", result, error)
-         refresh()
-     }
-diff --git a/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt b/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt
-index 6534d8a..0ff3353 100644
---- a/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/action/ActionExecutor.kt
-@@ -18,16 +18,20 @@ class ActionExecutor(
-     suspend fun execute(
-         intent: ActionIntent,
-         context: ActionContext,
-+        onGuardDecision: (GuardDecision) -> Unit = {},
-+        onTapDispatched: (ActionPlan, Boolean) -> Unit = { _, _ -> },
-         awaitPage: suspend (expected: Set<String>, timeoutMs: Long) -> String?,
-     ): ActionExecution {
-         val startedAt = clock()
-         val decision = ActionGuard.plan(intent, context)
-+        onGuardDecision(decision)
-         if (decision !is GuardDecision.AllowDryRun) {
-             return ActionExecution(decision = decision, durationMs = (clock() - startedAt).coerceAtLeast(0))
-         }
-         val result = runCatching {
-             controller.tap(decision.plan.tapPoint.x.toFloat(), decision.plan.tapPoint.y.toFloat())
-         }.getOrDefault(false)
-+        onTapDispatched(decision.plan, result)
-         val pageAfter = if (result) awaitPage(decision.plan.expectedPageAfter, decision.plan.timeoutMs) else null
-         return ActionExecution(
-             decision = decision,
-diff --git a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
-index 705b3d9..04401b7 100644
---- a/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/action/ActionGuard.kt
-@@ -13,6 +13,7 @@ enum class ActionType {
-     OPEN_DUNGEON,
-     OPEN_AREA_MAP, OPEN_AREA_SWITCH, SELECT_AREA, OPEN_DUNGEON_LIST,
-     SELECT_DUNGEON, START_DUNGEON_FREE, ENABLE_AUTO_BATTLE,
-+    RECONNECT_GAME, AUTO_SELL_INVENTORY,
-     CLOSE_SAFE_DIALOG, PURCHASE,
- }
- enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
-@@ -39,6 +40,10 @@ object ActionPolicyRegistry {
-         ActionType.SELECT_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.candidate", setOf("DUNGEON_DETAIL")),
-         ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("BATTLE", "LOADING")),
-         ActionType.ENABLE_AUTO_BATTLE to ActionPolicy(RiskLevel.NORMAL, setOf("BATTLE"), "battle.auto", setOf("BATTLE")),
-+        ActionType.RECONNECT_GAME to ActionPolicy(RiskLevel.NORMAL, setOf("NETWORK_DISCONNECTED"), "network.reconnect",
-+            setOf("HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE")),
-+        ActionType.AUTO_SELL_INVENTORY to ActionPolicy(RiskLevel.SENSITIVE, setOf("INVENTORY_FULL"), "inventory.auto_sell",
-+            setOf("HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE")),
-         ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("CHARACTER_SELECT", "HOME", "AREA_MAP")),
-         ActionType.PURCHASE to ActionPolicy(RiskLevel.FORBIDDEN_AUTO, emptySet(), "purchase.confirm", emptySet()),
-     )
-@@ -98,7 +103,7 @@ object ActionGuard {
-         val rect = context.actionTargets[policy.requiredTargetId] ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
-         if (!viewport.contains(rect)) return deny(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT)
-         if (policy.riskLevel == RiskLevel.SENSITIVE) {
--            if (context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
-+            if (intent.type == ActionType.START_DUNGEON_FREE && context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
-             if (context.dailyAlreadySuccess) return deny(GuardDenyReason.DAILY_ALREADY_SUCCESS)
-             if (context.purchaseSignalPresent) return deny(GuardDenyReason.PURCHASE_SIGNAL_PRESENT)
-         }
-@@ -109,7 +114,7 @@ object ActionGuard {
-                 ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
-                 page.pageId,
-                 policy.expectedPagesAfter,
--                if (intent.type == ActionType.SELECT_AREA) 30_000L else 15_000L,
-+                15_000L,
-             ),
-             listOf("ALL_PRECONDITIONS_CONFIRMED"),
-         )
-diff --git a/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt b/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
-index b4350c9..b67af28 100644
---- a/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/automation/AutomationState.kt
-@@ -38,6 +38,7 @@ sealed interface AutomationEvent {
-     data object TargetActivated : AutomationEvent
-     data object TargetActivationTimedOut : AutomationEvent
-     data object RequestResume : AutomationEvent
-+    data object RunFinished : AutomationEvent
-     data object Pause : AutomationEvent
-     data class EnvironmentChanged(val reason: EnvironmentChangeReason) : AutomationEvent
-     data object Stop : AutomationEvent
-diff --git a/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt b/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
-index e721802..0c6911b 100644
---- a/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/automation/AutomationStateMachine.kt
-@@ -59,7 +59,7 @@ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDL
-         AutomationEvent.Stop -> AutomationState.STOPPED
-         is AutomationEvent.Fail -> AutomationState.ERROR
-         AutomationEvent.Reset -> if (current in setOf(AutomationState.STOPPED, AutomationState.ERROR)) AutomationState.IDLE else null
--        AutomationEvent.StartPrecheck -> if (current in setOf(AutomationState.IDLE, AutomationState.ERROR, AutomationState.WINDOW_CHECK, AutomationState.READY, AutomationState.PAUSED)) AutomationState.PRECHECK else null
-+        AutomationEvent.StartPrecheck -> if (current in setOf(AutomationState.IDLE, AutomationState.ERROR, AutomationState.PERMISSION_REQUIRED, AutomationState.WINDOW_CHECK, AutomationState.READY, AutomationState.PAUSED)) AutomationState.PRECHECK else null
-         AutomationEvent.PermissionMissing -> if (current == AutomationState.PRECHECK) AutomationState.PERMISSION_REQUIRED else null
-         AutomationEvent.DeviceReady -> if (current in setOf(AutomationState.PRECHECK, AutomationState.PERMISSION_REQUIRED)) AutomationState.DEVICE_READY else null
-         AutomationEvent.CheckWindow -> if (current == AutomationState.DEVICE_READY) AutomationState.WINDOW_CHECK else null
-@@ -71,6 +71,7 @@ class AutomationStateMachine(initialState: AutomationState = AutomationState.IDL
-             current == AutomationState.PAUSED &&
-             mutableRecoveryRequirement == RecoveryRequirement.EXPLICIT_CONFIRMATION
-         ) AutomationState.WAIT_TARGET_ACTIVE else null
-+        AutomationEvent.RunFinished -> if (current == AutomationState.RUNNING_PLACEHOLDER) AutomationState.READY else null
-         AutomationEvent.Pause -> if (current == AutomationState.RUNNING_PLACEHOLDER) AutomationState.PAUSED else null
-         is AutomationEvent.EnvironmentChanged -> when (current) {
-             AutomationState.READY -> AutomationState.WINDOW_CHECK
-diff --git a/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt b/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt
-index 8ebe565..22f6c9a 100644
---- a/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/diagnostics/RunLogger.kt
-@@ -8,31 +8,117 @@ import java.util.UUID
- class RunLogger(context: Context, val sessionId: String = UUID.randomUUID().toString()) {
-     private val file = File(context.filesDir, "run-logs/$sessionId.jsonl").also { it.parentFile?.mkdirs() }
-     private var lastStateFingerprint: String? = null
-+    private var sequence = 0L
-+    private var ended = false
-+    private val startedAt = System.nanoTime() / 1_000_000L
-+    private var gestureCount = 0
-+    private var actionCount = 0
-+    private var guardDenyCount = 0
-+    private var networkReconnectCount = 0
-+    private var inventoryAutoSellCount = 0
-+
-+    init {
-+        file.createNewFile()
-+        check(file.canWrite()) { "RUN_LOG_UNAVAILABLE" }
-+    }
- 
-     @Synchronized
--    fun start(values: Map<String, Any?>) = append("START", values)
-+    fun event(
-+        eventType: String,
-+        businessState: String,
-+        automationState: String,
-+        result: String? = null,
-+        errorCode: String? = null,
-+        values: Map<String, Any?> = emptyMap(),
-+    ) {
-+        check(!ended) { "SESSION_ALREADY_ENDED" }
-+        append(eventType, businessState, automationState, result, errorCode, values)
-+        when (eventType) {
-+            "ACTION_INTENT" -> actionCount++
-+            "INPUT_DISPATCH" -> if (values["dispatchAccepted"] == true) gestureCount++
-+            "GUARD_DECISION" -> if (values["guardDecision"] == "DENY") guardDenyCount++
-+            "RECONNECT_ATTEMPT" -> networkReconnectCount++
-+            "AUTO_SELL_INTENT" -> inventoryAutoSellCount++
-+        }
++    private fun diagnosticOcr(metrics: VisionMetrics): List<Map<String, Any?>> = metrics.ocrLines.map { line ->
++        mapOf("text" to line.normalizedText.take(80), "confidence" to line.reportedConfidence,
++            "rect" to line.rect.toString())
 +    }
 +
-+    @Synchronized
-+    fun end(businessState: String, automationState: String, result: String, errorCode: String?, values: Map<String, Any?> = emptyMap()) {
-+        if (ended) return
-+        append("SESSION_END", businessState, automationState, result, errorCode,
-+            values + mapOf("endedAt" to System.currentTimeMillis(), "totalDurationMs" to (System.nanoTime() / 1_000_000L - startedAt),
-+                "finalBusinessState" to businessState, "gestureCount" to gestureCount, "actionCount" to actionCount,
-+                "guardDenyCount" to guardDenyCount, "networkReconnectCount" to networkReconnectCount,
-+                "inventoryAutoSellCount" to inventoryAutoSellCount, "finalStablePage" to values["finalStablePage"],
-+                "finalResult" to result, "finalErrorCode" to errorCode))
-+        ended = true
++    private fun diagnosticCandidates(metrics: VisionMetrics): Map<String, Float> = when (val detection = metrics.pageDetection) {
++        is com.lidquan.yishigame.vision.PageDetection.Matched -> mapOf(detection.pageId to detection.confidence)
++        is com.lidquan.yishigame.vision.PageDetection.Ambiguous -> detection.candidates.associate { it.pageId to it.confidence }
++        is com.lidquan.yishigame.vision.PageDetection.Unknown -> emptyMap()
 +    }
 +
-+    val isEnded: Boolean get() = ended
-+
-+    @Synchronized
-+    fun start(values: Map<String, Any?>) = event("SESSION_START", "PRECHECK", "PRECHECK", values = values)
- 
-     @Synchronized
-     fun state(values: Map<String, Any?>) {
-         val fingerprint = values.toSortedMap().toString()
-         if (fingerprint == lastStateFingerprint) return
-         lastStateFingerprint = fingerprint
--        append("STATE", values)
-+        event("BUSINESS_STATE", values["businessState"]?.toString() ?: "UNKNOWN", "RUNNING_PLACEHOLDER", values = values)
-     }
- 
-     @Synchronized
--    fun action(values: Map<String, Any?>) = append("ACTION", values)
-+    fun action(values: Map<String, Any?>) = event("ACTION_FINISH", values["pageAfter"]?.toString() ?: "UNKNOWN", "RUNNING_PLACEHOLDER", values = values)
- 
-     @Synchronized
--    fun finish(result: String, errorCode: String? = null) =
--        append("RESULT", mapOf("result" to result, "errorCode" to errorCode))
-+    fun finish(result: String, errorCode: String? = null) = end(result, "RUNNING_PLACEHOLDER", result, errorCode)
- 
--    private fun append(kind: String, values: Map<String, Any?>) {
-+    private fun append(eventType: String, businessState: String, automationState: String, result: String?, errorCode: String?, values: Map<String, Any?>) {
-         val json = JSONObject()
-             .put("timestamp", System.currentTimeMillis())
-+            .put("monotonicMs", System.nanoTime() / 1_000_000L)
-             .put("sessionId", sessionId)
--            .put("kind", kind)
-+            .put("sequence", ++sequence)
-+            .put("eventType", eventType)
-+            .put("businessState", businessState)
-+            .put("automationState", automationState)
-+            .put("result", result ?: JSONObject.NULL)
-+            .put("errorCode", errorCode ?: JSONObject.NULL)
-         values.forEach { (key, value) -> json.put(key, value ?: JSONObject.NULL) }
-         file.appendText(json.toString() + "\n")
-     }
-+
-+    companion object {
-+        fun finalizeOrphanedSessions(context: Context) {
-+            File(context.filesDir, "run-logs").listFiles { file -> file.extension == "jsonl" }?.forEach { file ->
-+                runCatching {
-+                    val raw = file.readText()
-+                    val events = raw.lineSequence().mapNotNull { line -> runCatching { JSONObject(line) }.getOrNull() }.toList()
-+                    if (events.isEmpty() || events.any { it.optString("eventType") == "SESSION_END" }) return@runCatching
-+                    val last = events.last()
-+                    val sessionId = last.optString("sessionId")
-+                    val sequence = events.maxOf { it.optLong("sequence") } + 1
-+                    val dispatched = events.filter { it.optString("eventType") == "INPUT_DISPATCH" && it.optBoolean("dispatchAccepted") }
-+                        .map { it.optString("actionId") }.toSet()
-+                    val finished = events.filter { it.optString("eventType") == "ACTION_FINISH" }
-+                        .map { it.optString("actionId") }.toSet()
-+                    val error = if ((dispatched - finished).isNotEmpty()) "INCOMPLETE_ACTION_TRACE" else "PROCESS_INTERRUPTED"
-+                    val terminal = JSONObject()
-+                        .put("timestamp", System.currentTimeMillis()).put("monotonicMs", System.nanoTime() / 1_000_000L)
-+                        .put("sessionId", sessionId).put("sequence", sequence).put("eventType", "SESSION_END")
-+                        .put("businessState", last.optString("businessState", "UNKNOWN"))
-+                        .put("automationState", "STOPPED").put("result", "FAILED").put("errorCode", error)
-+                        .put("endedAt", System.currentTimeMillis()).put("totalDurationMs", JSONObject.NULL)
-+                        .put("finalBusinessState", last.optString("businessState", "UNKNOWN"))
-+                        .put("finalStablePage", JSONObject.NULL).put("gestureCount", dispatched.size)
-+                        .put("actionCount", events.count { it.optString("eventType") == "ACTION_INTENT" })
-+                        .put("guardDenyCount", events.count { it.optString("eventType") == "GUARD_DECISION" && it.optString("guardDecision") == "DENY" })
-+                        .put("networkReconnectCount", events.count { it.optString("eventType") == "RECONNECT_ATTEMPT" })
-+                        .put("inventoryAutoSellCount", events.count { it.optString("eventType") == "AUTO_SELL_INTENT" })
-+                        .put("finalResult", "FAILED").put("finalErrorCode", error)
-+                    file.appendText((if (raw.endsWith("\n")) "" else "\n") + terminal.toString() + "\n")
-+                }
-+            }
-+        }
-+    }
- }
+     private suspend fun executeLoggedAction(logger: RunLogger, executor: ActionExecutor, intent: ActionIntent,
+         state: EnvironmentUiState, retryIndex: Int, actionId: String): ActionExecution {
+         val policy = com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)
 diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-index 5427ce8..837622f 100644
+index 837622f..cbc87f7 100644
 --- a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-@@ -37,6 +37,7 @@ data class RegexOcrSignalDefinition(
-     val pattern: Regex,
-     val actionTargetId: String? = null,
-     val actionTargetRoi: NormalizedRect? = null,
-+    val evidenceConfidence: Float? = null,
- )
+@@ -155,6 +155,7 @@ class ConfiguredVisionEngine(
+             currentMap = currentMap,
+             currentDungeon = currentDungeon,
+             evidenceIds = evidence.map { it.id },
++            ocrLines = allOcrLines.take(24),
+         )
+     }
  
- data class TemplateSignalDefinition(
-@@ -108,11 +109,12 @@ class ConfiguredVisionEngine(
-             val lines = linesIn(roi)
-             val match = lines.firstOrNull { signal.pattern.containsMatchIn(it.normalizedText) }
-             if (match != null) {
--                evidence += OcrEvidence(signal.id, match.text, match.normalizedText, match.confidence, match.rect)
-+                val confidence = signal.evidenceConfidence ?: match.confidence
-+                evidence += OcrEvidence(signal.id, match.text, match.normalizedText, confidence, match.rect)
-                 if (signal.actionTargetId != null) {
-                     actionTargets += ActionTargetEvidence(
-                         signal.actionTargetId,
--                        match.confidence,
-+                        confidence,
-                         signal.actionTargetRoi?.let { ViewportMapper.toScreen(it, currentViewport) } ?: match.rect,
-                     )
-                 }
-@@ -132,11 +134,18 @@ class ConfiguredVisionEngine(
-             actionTargets += ActionTargetEvidence("battle.auto", 0.85f, autoRect)
-         }
-         val detectorStarted = System.nanoTime()
--        val detection = detector.detect(evidence)
-+        // Explicit modal evidence takes priority over the visible page behind it.
-+        val modal = when {
-+            evidence.any { it.id == "network.title" } -> "NETWORK_DISCONNECTED"
-+            evidence.any { it.id == "inventory.title" } -> "INVENTORY_FULL"
-+            else -> null
-+        }
-+        val detection = detector.detect(evidence, modal?.let { setOf(it) })
-         val detectorMs = (System.nanoTime() - detectorStarted) / 1_000_000L
-         return VisionAnalysis(
-             detection = detection,
-             freeAttemptState = freeState,
-+            freeAttempts = freeAttemptOcr.mapNotNull { parseCounter(it.normalizedText, "免费") }.distinct().singleOrNull(),
-             templateDurationMs = templateNanos / 1_000_000L,
-             ocrDurationMs = ocrNanos / 1_000_000L,
-             pageDetectorDurationMs = detectorMs,
-@@ -216,6 +225,8 @@ fun initialVisionConfiguration(): VisionConfiguration {
-             page("SETTINGS", "settings"),
-             page("CHARACTER_SELECT", "character"),
-             page("SAFE_DIALOG", "dialog"),
-+            PageDefinition("NETWORK_DISCONNECTED", 1, listOf(SignalRule("network.title", 0.8f)), threshold = 0.85f, minimumMargin = 0.1f),
-+            PageDefinition("INVENTORY_FULL", 1, listOf(SignalRule("inventory.title", 0.8f)), threshold = 0.85f, minimumMargin = 0.1f),
-             page("HOME", "home"),
-             page("AREA_MAP", "area", negative = listOf(SignalRule("area_picker.anchor", 0.8f))),
-             page("AREA_PICKER", "area_picker"),
-@@ -223,21 +234,30 @@ fun initialVisionConfiguration(): VisionConfiguration {
-                 required = listOf(SignalRule("dungeon.title", 0.8f), SignalRule("dungeon.badge.first", 0.8f)),
-                 threshold = 0.85f, minimumMargin = 0.1f),
-             page("DUNGEON_DETAIL", "detail"),
--            page("BATTLE", "battle"),
-+            page("BATTLE", "battle", negative = listOf(SignalRule("home.title", 0.8f), SignalRule("area.title", 0.8f),
-+                SignalRule("area_picker.title", 0.8f), SignalRule("dungeon.title", 0.8f), SignalRule("detail.title", 0.8f))),
-         ),
-         semanticOcrSignals = listOf(
-             SemanticOcrSignalDefinition("detail.free", NormalizedRect(0.20f, 0.52f, 0.80f, 0.85f), SemanticOcrSignalType.FREE_ATTEMPT),
-             SemanticOcrSignalDefinition("battle.progress", NormalizedRect(0.25f, 0.00f, 0.75f, 0.20f), SemanticOcrSignalType.PROGRESS),
-         ),
-         regexOcrSignals = listOf(
-+            RegexOcrSignalDefinition("network.title", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
-+                Regex("网络错误|(?:网络|服务器).*(?:断开|中断|连接失败|连接异常|无法连接)|已与服务器断开连接"), evidenceConfidence = 0.9f),
-+            RegexOcrSignalDefinition("network.anchor", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
-+                Regex("^(?:重连|重新连接|点击重连|确定)$"), "network.reconnect", evidenceConfidence = 0.9f),
-+            RegexOcrSignalDefinition("inventory.title", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
-+                Regex("背包.*(?:已满|满了|空间不足)"), evidenceConfidence = 0.9f),
-+            RegexOcrSignalDefinition("inventory.anchor", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
-+                Regex("^自动出售$"), "inventory.auto_sell", evidenceConfidence = 0.9f),
-             RegexOcrSignalDefinition("dialog.title", NormalizedRect(0.20f, 0.25f, 0.80f, 0.60f), Regex("更新|网络错误")),
--            RegexOcrSignalDefinition("home.dungeon", NormalizedRect(0.20f, 0.00f, 0.80f, 0.16f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), "home.dungeon"),
-+            RegexOcrSignalDefinition("home.dungeon", NormalizedRect(0.20f, 0.00f, 0.80f, 0.16f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), "home.dungeon", evidenceConfidence = 0.9f),
-             RegexOcrSignalDefinition(
-                 "dungeon.badge.first", NormalizedRect(0.34f, 0.30f, 0.42f, 0.38f),
-                 Regex("^[1-9]$"), "dungeon.candidate",
--                NormalizedRect(0.23f, 0.32f, 0.39f, 0.40f),
-+                NormalizedRect(0.23f, 0.32f, 0.39f, 0.40f), evidenceConfidence = 0.9f,
-             ),
--            RegexOcrSignalDefinition("battle.title", NormalizedRect(0.20f, 0.00f, 0.80f, 0.18f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])")),
-+            RegexOcrSignalDefinition("battle.title", NormalizedRect(0.20f, 0.00f, 0.80f, 0.18f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), evidenceConfidence = 0.9f),
-         ),
-     )
- }
 diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-index cf1be08..0808fe9 100644
+index 0808fe9..724550d 100644
 --- a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-@@ -62,6 +62,7 @@ data class VisionMetrics(
-     val stablePage: StablePage? = null,
-     val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
-     val actionTargets: Map<String, WindowBounds> = emptyMap(),
-+    val freeAttempts: CounterValue? = null,
-     val progress: CounterValue? = null,
-     val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+@@ -68,4 +68,5 @@ data class VisionMetrics(
      val currentMap: String? = null,
+     val currentDungeon: String? = null,
+     val evidenceIds: List<String> = emptyList(),
++    val ocrLines: List<OcrEvidence> = emptyList(),
+ )
 diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-index 35d7168..6b76d2d 100644
+index 6b76d2d..3c91517 100644
 --- a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-@@ -23,6 +23,7 @@ data class VisionAnalysis(
-     val ocrDurationMs: Long = 0,
-     val pageDetectorDurationMs: Long = 0,
-     val actionTargets: List<ActionTargetEvidence> = emptyList(),
-+    val freeAttempts: CounterValue? = null,
-     val progress: CounterValue? = null,
-     val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
+@@ -29,6 +29,7 @@ data class VisionAnalysis(
      val currentMap: String? = null,
-@@ -42,6 +43,8 @@ class VisionWorker(
-     private val stableTracker = StablePageTracker()
-     private val recentDurations = ArrayDeque<Long>()
-     private var job: Job? = null
-+    private var generation = 0L
-+    private var invalidatedThroughFrame = 0L
+     val currentDungeon: String? = null,
+     val evidenceIds: List<String> = emptyList(),
++    val ocrLines: List<OcrEvidence> = emptyList(),
+ )
  
-     fun start(scope: CoroutineScope, viewportVersion: () -> Long) {
-         if (job?.isActive == true) return
-@@ -51,13 +54,17 @@ class VisionWorker(
-             val started = System.nanoTime()
-             while (isActive) {
-                 val frame = frameStore.latestSnapshot()
--                if (frame != null && frame.frameId != lastFrameId) {
-+                if (frame != null && frame.frameId != lastFrameId && frame.frameId > invalidatedThroughFrame) {
-+                    val analysisGeneration = generation
-+                    val analysisVersion = viewportVersion()
-+                    val observedAt = System.currentTimeMillis()
-                     val before = System.nanoTime()
-                     val result = withContext(Dispatchers.Default) { analyze(frame) }
-+                    if (generation != analysisGeneration || viewportVersion() != analysisVersion) continue
-                     val duration = (System.nanoTime() - before) / 1_000_000L
-                     processed++
-                     val seconds = (System.nanoTime() - started).coerceAtLeast(1L) / 1_000_000_000f
--                    val stable = stableTracker.add(result.detection, viewportVersion(), System.currentTimeMillis())
-+                    val stable = stableTracker.add(result.detection, analysisVersion, observedAt)
-                     recentDurations.addLast(duration)
-                     while (recentDurations.size > 100) recentDurations.removeFirst()
-                     val sorted = recentDurations.sorted()
-@@ -74,6 +81,7 @@ class VisionWorker(
-                         stablePage = stable,
-                         freeAttemptState = result.freeAttemptState,
-                         actionTargets = result.actionTargets.associate { it.id to it.rect },
-+                        freeAttempts = result.freeAttempts,
-                         progress = result.progress,
-                         autoBattleState = result.autoBattleState,
+ class VisionWorker(
+@@ -87,6 +88,7 @@ class VisionWorker(
                          currentMap = result.currentMap,
-@@ -88,6 +96,8 @@ class VisionWorker(
-     }
- 
-     fun invalidate() {
-+        generation++
-+        invalidatedThroughFrame = frameStore.metadata.value.frameId
-         stableTracker.clear()
-         recentDurations.clear()
-         mutableMetrics.value = VisionMetrics()
-diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt
-index 4341ca7..18c9b6b 100644
---- a/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/action/ActionExecutorTest.kt
-@@ -26,16 +26,21 @@ class ActionExecutorTest {
-     @Test fun `executor taps only after guard allow and verifies postcondition`() = runTest {
-         val controller = FakeController()
-         val executor = ActionExecutor(controller) { 1_500 }
-+        val events = mutableListOf<String>()
-         val context = ActionContext(
-             AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
-             WindowGate.MATCHED, WindowBounds(0, 0, 100, 100), StablePage("DUNGEON_DETAIL", .9f, 1_000, 1),
-             1, 1_500, actionTargets = mapOf("dungeon.start_free" to WindowBounds(10, 10, 20, 20)),
-             freeAttemptState = FreeAttemptState.AVAILABLE,
-         )
--        val allowed = executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context) { _, _ -> "BATTLE" }
-+        val allowed = executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context,
-+            onGuardDecision = { events += if (it is GuardDecision.AllowDryRun) "ALLOW" else "DENY" },
-+            onTapDispatched = { _, accepted -> events += "DISPATCH:$accepted" },
-+        ) { _, _ -> "BATTLE" }
-         assertEquals(true, allowed.tapResult)
-         assertEquals(true, allowed.postconditionMet)
-         assertEquals(1, controller.taps)
-+        assertEquals(listOf("ALLOW", "DISPATCH:true"), events)
-         assertNull(executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) { _, _ -> "BATTLE" }.tapResult)
-         assertEquals(1, controller.taps)
-     }
-diff --git a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
-index 6362970..14bbce2 100644
---- a/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/action/ActionGuardTest.kt
-@@ -49,4 +49,21 @@ class ActionGuardTest {
-         val outside = safe.copy(actionTargets = mapOf("dungeon.start_free" to WindowBounds(90, 90, 110, 110)))
-         assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(intent, outside) as GuardDecision.Deny).reason)
-     }
-+
-+    @Test fun `recovery actions require their own explicit page and bounded target`() {
-+        val reconnect = ActionIntent(ActionType.RECONNECT_GAME)
-+        val sell = ActionIntent(ActionType.AUTO_SELL_INVENTORY)
-+        val network = safe.copy(stablePage = safe.stablePage?.copy(pageId = "NETWORK_DISCONNECTED"),
-+            actionTargets = mapOf("network.reconnect" to WindowBounds(10, 10, 20, 20)), freeAttemptState = FreeAttemptState.UNKNOWN)
-+        assertTrue(ActionGuard.plan(reconnect, network) is GuardDecision.AllowDryRun)
-+        assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(sell, network) as GuardDecision.Deny).reason)
-+        val inventory = network.copy(stablePage = network.stablePage?.copy(pageId = "INVENTORY_FULL"),
-+            actionTargets = mapOf("inventory.auto_sell" to WindowBounds(10, 10, 20, 20)))
-+        assertEquals(RiskLevel.SENSITIVE, ActionPolicyRegistry.policy(sell.type)?.riskLevel)
-+        assertTrue(ActionGuard.plan(sell, inventory) is GuardDecision.AllowDryRun)
-+        assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(sell,
-+            inventory.copy(actionTargets = mapOf("inventory.auto_sell" to WindowBounds(90, 90, 110, 110)))) as GuardDecision.Deny).reason)
-+        assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED,
-+            (ActionGuard.plan(ActionIntent(ActionType.START_DUNGEON_FREE), safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
-+    }
- }
-diff --git a/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt b/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
-index 1d4e043..6a43e25 100644
---- a/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/automation/AutomationStateMachineTest.kt
-@@ -6,6 +6,28 @@ import org.junit.Assert.assertTrue
- import org.junit.Test
- 
- class AutomationStateMachineTest {
-+    @Test fun `finished session permits a new precheck without retaining running state`() {
-+        val machine = AutomationStateMachine(AutomationState.RUNNING_PLACEHOLDER)
-+        assertTrue(machine.dispatch(AutomationEvent.RunFinished))
-+        assertEquals(AutomationState.READY, machine.state.value)
-+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
-+        assertFalse(machine.dispatch(AutomationEvent.RunFinished))
-+    }
-+
-+    @Test
-+    fun `environment check can retry after permission is granted`() {
-+        val machine = AutomationStateMachine()
-+
-+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
-+        assertTrue(machine.dispatch(AutomationEvent.PermissionMissing))
-+        assertEquals(AutomationState.PERMISSION_REQUIRED, machine.state.value)
-+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
-+        assertTrue(machine.dispatch(AutomationEvent.DeviceReady))
-+        assertTrue(machine.dispatch(AutomationEvent.CheckWindow))
-+        assertTrue(machine.dispatch(AutomationEvent.WindowVerified))
-+        assertEquals(AutomationState.READY, machine.state.value)
-+    }
-+
-     @Test
-     fun `arming waits for target activation before reaching placeholder`() {
-         val machine = AutomationStateMachine()
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt
-index c596aa7..3eccce2 100644
---- a/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/ConfiguredVisionEngineTest.kt
-@@ -6,6 +6,7 @@ import com.lidquan.yishigame.viewport.NormalizedRect
- import com.lidquan.yishigame.vision.ocr.OcrEngine
- import kotlinx.coroutines.runBlocking
- import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertTrue
- import org.junit.Test
- 
- class ConfiguredVisionEngineTest {
-@@ -29,6 +30,43 @@ class ConfiguredVisionEngineTest {
-         assertEquals(free.rect, result.actionTargets.single().rect)
-     }
- 
-+    @Test fun `recovery requires explicit dialog and exact action text`() = runBlocking {
-+        val config = initialVisionConfiguration()
-+        suspend fun detect(vararg texts: String): VisionAnalysis {
-+            val lines = texts.mapIndexed { index, value ->
-+                OcrEvidence("ocr.text", value, value, null, WindowBounds(20, 25 + index * 10, 80, 30 + index * 10))
-+            }
-+            return ConfiguredVisionEngine(OcrEngine { _, _ -> lines }, { viewport }, config).analyze(frame)
-+        }
-+        assertEquals("NETWORK_DISCONNECTED", (detect("服务器连接中断", "重新连接").detection as PageDetection.Matched).pageId)
-+        assertEquals("INVENTORY_FULL", (detect("背包已满", "自动出售").detection as PageDetection.Matched).pageId)
-+        assertEquals("NETWORK_DISCONNECTED", (detect("服务器连接中断", "确定").detection as PageDetection.Matched).pageId)
-+        assertEquals("NETWORK_DISCONNECTED", (detect("网络错误").detection as PageDetection.Matched).pageId)
-+        assertTrue(detect("网络错误", "确定").actionTargets.any { it.id == "network.reconnect" })
-+        assertTrue(detect("背包已满", "出售").actionTargets.none { it.id == "inventory.auto_sell" })
-+    }
-+
-+    @Test fun `local OCR without confidence recognizes counters and separates home from battle`() = runBlocking {
-+        fun line(text: String, rect: WindowBounds) = OcrEvidence("ocr.text", text, text, null, rect)
-+        val counter = line("1/5", WindowBounds(40, 7, 60, 12))
-+        val settings = line("设置", WindowBounds(80, 10, 90, 16))
-+        val home = line("领取任务", WindowBounds(5, 18, 30, 22))
-+        suspend fun detect(lines: List<OcrEvidence>) = ConfiguredVisionEngine(
-+            OcrEngine { _, _ -> lines }, { viewport }, initialVisionConfiguration(),
-+        ).analyze(frame)
-+        assertEquals("BATTLE", (detect(listOf(counter, settings)).detection as PageDetection.Matched).pageId)
-+        assertEquals("HOME", (detect(listOf(counter, settings, home)).detection as PageDetection.Matched).pageId)
-+        val area = detect(listOf(counter, settings,
-+            line("切换区域", WindowBounds(10, 82, 30, 88)),
-+            line("地下城", WindowBounds(75, 82, 95, 88))))
-+        assertEquals("AREA_MAP", (area.detection as PageDetection.Matched).pageId)
-+        val badge = line("2", WindowBounds(36, 31, 40, 35))
-+        val title = line("地下城", WindowBounds(40, 15, 60, 19))
-+        val list = detect(listOf(badge, title))
-+        assertEquals("DUNGEON_LIST", (list.detection as PageDetection.Matched).pageId)
-+        assertTrue(list.actionTargets.any { it.id == "dungeon.candidate" })
-+    }
-+
-     private suspend fun analyze(
-         pageSignals: List<OcrSignalDefinition>,
-         semanticSignals: List<SemanticOcrSignalDefinition>,
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
-index 3eab578..fe436fa 100644
---- a/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/VisionConfigurationTest.kt
-@@ -13,9 +13,9 @@ class VisionConfigurationTest {
-         assertTrue(configuration.templateSetVersion.isNotBlank())
-         assertTrue(configuration.pageDefinitionVersion.isNotBlank())
-         assertEquals(
--            setOf("SETTINGS", "CHARACTER_SELECT", "SAFE_DIALOG", "HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE"),
-+            setOf("SETTINGS", "CHARACTER_SELECT", "SAFE_DIALOG", "NETWORK_DISCONNECTED", "INVENTORY_FULL", "HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE"),
-             configuration.pages.map { it.pageId }.toSet(),
-         )
--        assertTrue(configuration.pages.all { it.required.size >= 2 })
-+        assertTrue(configuration.pages.all { it.required.size >= if (it.pageId in setOf("NETWORK_DISCONNECTED", "INVENTORY_FULL")) 1 else 2 })
-     }
- }
-diff --git a/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt
-index f332fb8..9641ff5 100644
---- a/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt
-+++ b/app/src/test/java/com/lidquan/yishigame/vision/VisionWorkerTest.kt
-@@ -2,13 +2,43 @@ package com.lidquan.yishigame.vision
- 
- import com.lidquan.yishigame.capture.LatestFrameStore
- import java.nio.ByteBuffer
--import kotlinx.coroutines.delay
-+import kotlinx.coroutines.CompletableDeferred
- import kotlinx.coroutines.runBlocking
--import org.junit.Assert.assertEquals
-+import kotlinx.coroutines.delay
-+import kotlinx.coroutines.withTimeout
- import org.junit.Assert.assertNull
-+import org.junit.Assert.assertEquals
- import org.junit.Test
- 
- class VisionWorkerTest {
-+    @Test fun `invalidate discards OCR already in flight and requires new frames`() = runBlocking {
-+        val store = LatestFrameStore()
-+        fun publish() = store.publish(1, 1, 4, 4, System.nanoTime(), ByteBuffer.wrap(ByteArray(4)))
-+        val entered = CompletableDeferred<Unit>()
-+        val release = CompletableDeferred<Unit>()
-+        var calls = 0
-+        val worker = VisionWorker(store, {
-+            calls++
-+            if (calls == 1) { entered.complete(Unit); release.await() }
-+            VisionAnalysis(PageDetection.Matched("AREA_MAP", .9f, emptyList()), FreeAttemptState.UNKNOWN)
-+        }, framesPerSecond = 10)
-+        try {
-+            publish()
-+            worker.start(this) { 1L }
-+            withTimeout(2_000) { entered.await() }
-+            worker.invalidate()
-+            release.complete(Unit)
-+            delay(250)
-+            assertEquals(0L, worker.metrics.value.frameId)
-+            publish()
-+            withTimeout(2_000) { while (worker.metrics.value.frameId == 0L) delay(10) }
-+            assertNull(worker.metrics.value.stablePage)
-+            publish()
-+            withTimeout(2_000) { while (worker.metrics.value.stablePage == null) delay(10) }
-+            assertEquals("AREA_MAP", worker.metrics.value.stablePage?.pageId)
-+        } finally { worker.stop() }
-+    }
-+
-     @Test fun `invalidate keeps worker alive for stop then restart lifecycle`() = runBlocking {
-         val store = LatestFrameStore()
-         val worker = VisionWorker(
+                         currentDungeon = result.currentDungeon,
+                         evidenceIds = result.evidenceIds,
++                        ocrLines = result.ocrLines,
+                     )
+                     lastFrameId = frame.frameId
+                 }
 diff --git a/codex/handoff/LATEST.md b/codex/handoff/LATEST.md
-index 5cdaaa0..e48d527 100644
+index e48d527..18efbf2 100644
 --- a/codex/handoff/LATEST.md
 +++ b/codex/handoff/LATEST.md
-@@ -1,3 +1,13 @@
-+# 最新交接：REQ-0006 — 2026-09-25（未完成）
+@@ -1,3 +1,11 @@
++# 2026-09-25 Diagnostic Run 最新断点
 +
-+当前分支 `feat/req-0006-single-dungeon-loop`，未合入 main。继续开发的实现包括 PRECHECK、旧 OCR/viewport 结果失效、地图与战斗页面判定冲突修复、断线及背包满受 Guard 控制的恢复、完整动作日志。用户已授权在明确断线弹窗中点击 OCR 识别的“确定”，仍须受 Guard、两次上限和后置条件约束。购买继续禁止自动执行。
++本轮仅增强私有诊断日志，未扩功能：OCR 结果与置信度、页面候选置信度、ActionIntent/Guard/tap、后置条件观察和具体阻断原因均可在同一 JSONL 会话追踪。AREA_PICKER→AREA_MAP 仍要求点击后的新鲜稳定页及目标地图一致。构建、单元及设备测试通过。
 +
-+真机已有 PRECHECK 通过及一次受控打开地图；地图实际打开但旧构建将其判成 Ambiguous，后置条件失败。最新判定修复已通过自动测试并安装，游戏随后反复断线，未能完成新构建的业务验证。没有真实 SUCCESS、同日 SKIP、免费次数或战斗进度证据。背包满处理未发生。首个副本角标和详情免费次数待真机验收；自动战斗 OFF/MISSING 尚不能可靠区分；`currentDungeon` 未可靠提取，DailyExecution 使用 `first-free-dungeon` 占位 ID，仅适用临时单副本验证。
-+
-+验证：Debug 构建通过，56 个 JVM 测试通过，设备测试 4 通过/1 跳过，diff 检查及公开仓库安全扫描通过。下一步先恢复游戏服务器与助手辅助功能/MediaProjection，确认游戏左、助手右、HOME 与 viewport 匹配，再执行 PRECHECK；逐步验证 SELECT_AREA 后置条件，争取首个完整 SUCCESS 与同日 SKIP。详见 `codex/reports/IMPLEMENT-0006.md`、`codex/reports/runs/REQ-0006-run-summary.md` 和 `LATEST.patch`。
++真机已安装新 APK；Pad ADB 正常，游戏左、助手右，辅助功能及屏幕采集经 PRECHECK 确认。游戏反复断线，唯一新会话止于 `PRECHECK_GAME_NOT_AT_HOME`（8 项 PASS、HOME FAIL，stablePage=`NETWORK_DISCONNECTED`），业务 tap 0。没有到区域切换，也没有 SUCCESS session。下一步待游戏能稳定停在 HOME，再从 PRECHECK 开始逐步跑诊断，不可沿用本次断线前视觉证据。
 +
 +---
 +
- # 最新交接：REQ-0006（未完成）
+ # 最新交接：REQ-0006 — 2026-09-25（未完成）
  
- ## 2026-09-24 Precheck 续测更新
+ 当前分支 `feat/req-0006-single-dungeon-loop`，未合入 main。继续开发的实现包括 PRECHECK、旧 OCR/viewport 结果失效、地图与战斗页面判定冲突修复、断线及背包满受 Guard 控制的恢复、完整动作日志。用户已授权在明确断线弹窗中点击 OCR 识别的“确定”，仍须受 Guard、两次上限和后置条件约束。购买继续禁止自动执行。
 diff --git a/codex/reports/IMPLEMENT-0006.md b/codex/reports/IMPLEMENT-0006.md
-index a3e63be..b49bb7a 100644
+index b49bb7a..090d154 100644
 --- a/codex/reports/IMPLEMENT-0006.md
 +++ b/codex/reports/IMPLEMENT-0006.md
-@@ -1,3 +1,15 @@
-+# IMPLEMENT-0006 — 2026-09-25 续开发（未验收）
+@@ -1,3 +1,11 @@
++# 2026-09-25 Diagnostic Run 补充（未验收）
 +
-+本次继续在 `feat/req-0006-single-dungeon-loop` 开发；没有合入 main。修复视觉结果与 viewport 版本、点击后的旧帧竞争；动作后置条件要求新鲜稳定页及目标区域匹配。真机观察到打开区域地图后 `AREA_MAP` 与背景战斗计数同时命中、页面判定为 Ambiguous；现给 `BATTLE` 增加地图/选择器/副本页排除信号，并补 JVM 回归测试。此修复已构建安装，**尚未在联网游戏中完成 SELECT_AREA 回归**。
++仅对现有视觉模型与 REQ-0006 日志做小幅修改：每帧保留最多 24 条本地 OCR 结果供私有运行日志记录；运行状态和动作后置观察写入 OCR 文本、原始 OCR confidence、候选页 confidence、稳定页时间和具体阻断原因（包括 `EXPECTED_PAGE_NOT_STABLE`、`PAGE_PREDATES_TAP`、`VIEWPORT_VERSION_CHANGED`、`WINDOW_NOT_ACTIVE_OR_MATCHED`、`TARGET_MAP_UNCONFIRMED`）。SELECT_AREA 仍须新鲜的 AREA_MAP 稳定页、当前 viewport 匹配且 `currentMap == 亡灵之地`，未延长超时。
 +
-+实现了 PRECHECK 结构化检查、断线与背包满弹窗识别、受 `ActionIntent → ActionPolicy → ActionGuard → Accessibility tap` 限制的恢复动作、最多两次重试、恢复后重新识别页面，以及动作生命周期 JSONL 日志。用户本日明确授权断线弹窗只有“确定”时点击该按钮；仅在 `NETWORK_DISCONNECTED` 稳定页且 OCR 精确识别按钮时才形成目标。`PURCHASE` 仍为 `FORBIDDEN_AUTO`。原始截图与 JSONL 只留本机或 App 私有目录。
-+
-+真机有两次可审计的前序会话：一次 PRECHECK 9/9 通过后因游戏未激活以 `ENVIRONMENT_CHANGED` 结束、零业务点击；一次 PRECHECK 通过并由 Guard 放行 `OPEN_AREA_MAP`，游戏实际打开地图，但旧视觉配置将地图判为 Ambiguous，后置条件以 `ACTION_OPEN_AREA_MAP_BLOCKED_OR_UNVERIFIED` 结束。之后游戏反复显示“网络错误 / 已与服务器断开连接”，仅有“确定”，新版未能从 HOME 完成新 PRECHECK；没有继续业务点击。新断线恢复动作尚未真机验证。**SUCCESS：否；同日 SKIP：否。** 免费次数、progress、自动战斗、自动回 HOME 均无真实业务证据；背包满未发生。单副本 DailyExecution 仍使用 `first-free-dungeon` 占位键，不能宣称真实副本 ID 去重。
-+
-+验证：`assembleDebug`、`testDebugUnitTest`（56/56）、`connectedDebugAndroidTest`（5 项，4 通过、1 私有 fixture 缺失跳过）、`git diff --check` 和公开仓库历史安全扫描均通过。首次完整 SUCCESS 仍受游戏服务器断线及后续真机链路未验证阻塞。详细状态轨迹见运行摘要；下文为历史交接记录。
++本次真机 PRECHECK 的前八项 PASS，HOME 检查 FAIL：稳定页为 `NETWORK_DISCONNECTED`，最终 `PRECHECK_GAME_NOT_AT_HOME`。零业务点击，未到 AREA_PICKER；无法宣称后置条件已经真机修复。Debug 构建、56 项 JVM 测试及 connected 设备测试通过（其中私有 fixture 测试跳过）。**无真实 SUCCESS。**
 +
 +---
 +
- # IMPLEMENT-0006 — 未完成的真机开发交接
+ # IMPLEMENT-0006 — 2026-09-25 续开发（未验收）
  
- ## 2026-09-24 启动前 Precheck 续测（仍未完成）
+ 本次继续在 `feat/req-0006-single-dungeon-loop` 开发；没有合入 main。修复视觉结果与 viewport 版本、点击后的旧帧竞争；动作后置条件要求新鲜稳定页及目标区域匹配。真机观察到打开区域地图后 `AREA_MAP` 与背景战斗计数同时命中、页面判定为 Ambiguous；现给 `BATTLE` 增加地图/选择器/副本页排除信号，并补 JVM 回归测试。此修复已构建安装，**尚未在联网游戏中完成 SELECT_AREA 回归**。
 diff --git a/codex/reports/runs/REQ-0006-run-summary.md b/codex/reports/runs/REQ-0006-run-summary.md
-index 3427c48..868d677 100644
+index 868d677..6cf486d 100644
 --- a/codex/reports/runs/REQ-0006-run-summary.md
 +++ b/codex/reports/runs/REQ-0006-run-summary.md
-@@ -1,3 +1,14 @@
-+# REQ-0006 真机运行脱敏摘要 — 2026-09-25 续测
+@@ -1,3 +1,11 @@
++# 2026-09-25 Diagnostic Run（新增）
 +
-+- Pad 经 ADB 授权连接；游戏左、助手右的窗口布局已在截图中核验。两次已保存的私有 JSONL 会话均执行 PRECHECK，且检查项 9/9 通过；原始 sessionId、截图、JSONL 留在本机私有目录。
-+- 会话 A：`PRECHECK_READY → WAIT_TARGET_ACTIVE → FAILED / ENVIRONMENT_CHANGED`；游戏未及时成为活动窗口，真实游戏业务 tap 为 0。
-+- 会话 B：`PRECHECK_READY → RUNNING → DailyExecution RUNNING → HOME → OPEN_AREA_MAP (Guard ALLOW，Accessibility 接受) → AREA_MAP 在游戏中可见 → FAILED / ACTION_OPEN_AREA_MAP_BLOCKED_OR_UNVERIFIED`。视觉日志显示地图证据与背景战斗计数同时出现，导致 `Ambiguous`；本次代码已调整判定，但尚无该修复的真机回归结果。受控真实业务 tap 为 1 次。
-+- 随后游戏反复出现“网络错误 / 已与服务器断开连接”，弹窗仅有“确定”。用户曾手动返回 HOME，但弹窗重现。新版 APK 已安装；重新安装造成辅助功能绑定与 MediaProjection 授权失效，未在新版完成 PRECHECK 或启动新业务会话。没有在断线弹窗上进行 ADB 游戏点击。用户已授权后续 Guard 控制的“确定”恢复动作，但运行中尚未验证。
-+- 执行区域：会话 B 尚停在当前地图，未进入区域选择；历史受控会话曾切换目标区域，但后置条件失败。执行副本：未选定；免费次数：`UNKNOWN`；progress：未读取；自动战斗：未判定；自动返回 HOME：否；DailyExecution 最终 SUCCESS：否；同日 SKIPPED：否。断线发生；背包满未观察到。购买和付费确认 0 次。
-+- 当前结论：**FAILED / 未完成 REQ-0006 验收**。必须待游戏稳定联网、重新获得两项系统授权后，从 HOME 重新 PRECHECK，逐步验证地图、区域、免费次数、战斗、HOME 与同日 SKIP，不得沿用旧证据。
++本轮安装含诊断日志的 APK 后，Pad 游戏左、助手右；辅助功能、MediaProjection 与窗口布局均已恢复并经应用 PRECHECK 检查。游戏在启动前再次弹出“网络错误 / 已与服务器断开连接”。本轮私有 JSONL 会话末尾为 `PRECHECK_CHECKS FAILED / GAME_NOT_AT_HOME`，稳定页 `NETWORK_DISCONNECTED`；九项检查中前八项 PASS、HOME FAIL，最终 `SESSION_END FAILED / PRECHECK_GAME_NOT_AT_HOME`。业务阶段停在 **PRECHECK**，真实游戏业务 tap 为 0。未进入 AREA_MAP、AREA_PICKER 或副本；免费次数、战斗进度、自动战斗状态均无本轮数据，**没有 SUCCESS session**。
++
++本轮代码只增加私有日志里的 OCR 文本及置信度、页面候选置信度、postcondition 阻断原因；没有因服务器异常绕过 PRECHECK，也没有在错误页继续坐标动作。`AREA_PICKER → AREA_MAP` 新版后置验证尚未取得真机样本。原始日志和截图仍只在 App/本机私有目录，公开仓库仅此脱敏摘要。
 +
 +---
 +
- # REQ-0006 真机运行脱敏摘要
+ # REQ-0006 真机运行脱敏摘要 — 2026-09-25 续测
  
- ## 2026-09-24 Precheck 续测
+ - Pad 经 ADB 授权连接；游戏左、助手右的窗口布局已在截图中核验。两次已保存的私有 JSONL 会话均执行 PRECHECK，且检查项 9/9 通过；原始 sessionId、截图、JSONL 留在本机私有目录。

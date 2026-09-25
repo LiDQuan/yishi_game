@@ -1,3 +1,11 @@
+# 2026-09-25 Diagnostic Run 补充（未验收）
+
+仅对现有视觉模型与 REQ-0006 日志做小幅修改：每帧保留最多 24 条本地 OCR 结果供私有运行日志记录；运行状态和动作后置观察写入 OCR 文本、原始 OCR confidence、候选页 confidence、稳定页时间和具体阻断原因（包括 `EXPECTED_PAGE_NOT_STABLE`、`PAGE_PREDATES_TAP`、`VIEWPORT_VERSION_CHANGED`、`WINDOW_NOT_ACTIVE_OR_MATCHED`、`TARGET_MAP_UNCONFIRMED`）。SELECT_AREA 仍须新鲜的 AREA_MAP 稳定页、当前 viewport 匹配且 `currentMap == 亡灵之地`，未延长超时。
+
+本次真机 PRECHECK 的前八项 PASS，HOME 检查 FAIL：稳定页为 `NETWORK_DISCONNECTED`，最终 `PRECHECK_GAME_NOT_AT_HOME`。零业务点击，未到 AREA_PICKER；无法宣称后置条件已经真机修复。Debug 构建、56 项 JVM 测试及 connected 设备测试通过（其中私有 fixture 测试跳过）。**无真实 SUCCESS。**
+
+---
+
 # IMPLEMENT-0006 — 2026-09-25 续开发（未验收）
 
 本次继续在 `feat/req-0006-single-dungeon-loop` 开发；没有合入 main。修复视觉结果与 viewport 版本、点击后的旧帧竞争；动作后置条件要求新鲜稳定页及目标区域匹配。真机观察到打开区域地图后 `AREA_MAP` 与背景战斗计数同时命中、页面判定为 Ambiguous；现给 `BATTLE` 增加地图/选择器/副本页排除信号，并补 JVM 回归测试。此修复已构建安装，**尚未在联网游戏中完成 SELECT_AREA 回归**。

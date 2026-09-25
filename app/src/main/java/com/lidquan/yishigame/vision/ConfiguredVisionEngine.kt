@@ -155,6 +155,7 @@ class ConfiguredVisionEngine(
             currentMap = currentMap,
             currentDungeon = currentDungeon,
             evidenceIds = evidence.map { it.id },
+            ocrLines = allOcrLines.take(24),
         )
     }
 

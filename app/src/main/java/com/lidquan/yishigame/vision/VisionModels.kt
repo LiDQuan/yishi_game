@@ -68,4 +68,5 @@ data class VisionMetrics(
     val currentMap: String? = null,
     val currentDungeon: String? = null,
     val evidenceIds: List<String> = emptyList(),
+    val ocrLines: List<OcrEvidence> = emptyList(),
 )

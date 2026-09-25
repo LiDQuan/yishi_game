@@ -576,6 +576,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "freeTotal" to snapshot.visionMetrics.freeAttempts?.total,
                 "viewportVersion" to snapshot.visionMetrics.stablePage?.viewportVersion,
                 "pageDetection" to snapshot.visionMetrics.pageDetection.javaClass.simpleName,
+                "visionConfidence" to snapshot.visionMetrics.stablePage?.confidence,
+                "visionCandidates" to diagnosticCandidates(snapshot.visionMetrics),
+                "ocr" to diagnosticOcr(snapshot.visionMetrics),
                 "progressCurrent" to progress?.current,
                 "progressTotal" to progress?.total,
                 "autoBattleState" to snapshot.visionMetrics.autoBattleState.name,
@@ -766,9 +769,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         while (System.nanoTime() / 1_000_000L < deadline) {
             val state = mutableUiState.value
             val page = state.visionMetrics.stablePage
+            val blockers = buildList {
+                if (page == null || page.pageId !in expected) add("EXPECTED_PAGE_NOT_STABLE")
+                if (page != null && page.observedAt < afterTap) add("PAGE_PREDATES_TAP")
+                if (page != null && page.viewportVersion != windowMonitor.version) add("VIEWPORT_VERSION_CHANGED")
+                if (state.windowGate != WindowGate.MATCHED || !state.targetActive) add("WINDOW_NOT_ACTIVE_OR_MATCHED")
+                if (intent == ActionType.SELECT_AREA && state.visionMetrics.currentMap != req0006TargetArea) add("TARGET_MAP_UNCONFIRMED")
+            }
             val evidence = mapOf("actionId" to actionId, "stablePage" to page?.pageId,
                 "currentMap" to state.visionMetrics.currentMap, "viewportVersion" to windowMonitor.version,
                 "pageDetection" to state.visionMetrics.pageDetection.javaClass.simpleName,
+                "visionConfidence" to page?.confidence,
+                "visionCandidates" to diagnosticCandidates(state.visionMetrics),
+                "pageObservedAt" to page?.observedAt,
+                "ocr" to diagnosticOcr(state.visionMetrics),
+                "postconditionBlockers" to blockers,
                 "evidenceIds" to state.visionMetrics.evidenceIds.joinToString())
             if (evidence != lastEvidence) {
                 logger.event("POSTCONDITION_OBSERVATION", req0006State, state.automationState.name, values = evidence)
@@ -782,6 +797,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             delay(250)
         }
         return null
+    }
+
+    private fun diagnosticOcr(metrics: VisionMetrics): List<Map<String, Any?>> = metrics.ocrLines.map { line ->
+        mapOf("text" to line.normalizedText.take(80), "confidence" to line.reportedConfidence,
+            "rect" to line.rect.toString())
+    }
+
+    private fun diagnosticCandidates(metrics: VisionMetrics): Map<String, Float> = when (val detection = metrics.pageDetection) {
+        is com.lidquan.yishigame.vision.PageDetection.Matched -> mapOf(detection.pageId to detection.confidence)
+        is com.lidquan.yishigame.vision.PageDetection.Ambiguous -> detection.candidates.associate { it.pageId to it.confidence }
+        is com.lidquan.yishigame.vision.PageDetection.Unknown -> emptyMap()
     }
 
     private suspend fun executeLoggedAction(logger: RunLogger, executor: ActionExecutor, intent: ActionIntent,

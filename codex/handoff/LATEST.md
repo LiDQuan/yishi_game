@@ -1,3 +1,11 @@
+# 2026-09-25 Diagnostic Run 最新断点
+
+本轮仅增强私有诊断日志，未扩功能：OCR 结果与置信度、页面候选置信度、ActionIntent/Guard/tap、后置条件观察和具体阻断原因均可在同一 JSONL 会话追踪。AREA_PICKER→AREA_MAP 仍要求点击后的新鲜稳定页及目标地图一致。构建、单元及设备测试通过。
+
+真机已安装新 APK；Pad ADB 正常，游戏左、助手右，辅助功能及屏幕采集经 PRECHECK 确认。游戏反复断线，唯一新会话止于 `PRECHECK_GAME_NOT_AT_HOME`（8 项 PASS、HOME FAIL，stablePage=`NETWORK_DISCONNECTED`），业务 tap 0。没有到区域切换，也没有 SUCCESS session。下一步待游戏能稳定停在 HOME，再从 PRECHECK 开始逐步跑诊断，不可沿用本次断线前视觉证据。
+
+---
+
 # 最新交接：REQ-0006 — 2026-09-25（未完成）
 
 当前分支 `feat/req-0006-single-dungeon-loop`，未合入 main。继续开发的实现包括 PRECHECK、旧 OCR/viewport 结果失效、地图与战斗页面判定冲突修复、断线及背包满受 Guard 控制的恢复、完整动作日志。用户已授权在明确断线弹窗中点击 OCR 识别的“确定”，仍须受 Guard、两次上限和后置条件约束。购买继续禁止自动执行。

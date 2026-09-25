@@ -29,6 +29,7 @@ data class VisionAnalysis(
     val currentMap: String? = null,
     val currentDungeon: String? = null,
     val evidenceIds: List<String> = emptyList(),
+    val ocrLines: List<OcrEvidence> = emptyList(),
 )
 
 class VisionWorker(
@@ -87,6 +88,7 @@ class VisionWorker(
                         currentMap = result.currentMap,
                         currentDungeon = result.currentDungeon,
                         evidenceIds = result.evidenceIds,
+                        ocrLines = result.ocrLines,
                     )
                     lastFrameId = frame.frameId
                 }

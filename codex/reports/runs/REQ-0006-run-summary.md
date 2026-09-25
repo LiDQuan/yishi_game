@@ -1,3 +1,11 @@
+# 2026-09-25 Diagnostic Run（新增）
+
+本轮安装含诊断日志的 APK 后，Pad 游戏左、助手右；辅助功能、MediaProjection 与窗口布局均已恢复并经应用 PRECHECK 检查。游戏在启动前再次弹出“网络错误 / 已与服务器断开连接”。本轮私有 JSONL 会话末尾为 `PRECHECK_CHECKS FAILED / GAME_NOT_AT_HOME`，稳定页 `NETWORK_DISCONNECTED`；九项检查中前八项 PASS、HOME FAIL，最终 `SESSION_END FAILED / PRECHECK_GAME_NOT_AT_HOME`。业务阶段停在 **PRECHECK**，真实游戏业务 tap 为 0。未进入 AREA_MAP、AREA_PICKER 或副本；免费次数、战斗进度、自动战斗状态均无本轮数据，**没有 SUCCESS session**。
+
+本轮代码只增加私有日志里的 OCR 文本及置信度、页面候选置信度、postcondition 阻断原因；没有因服务器异常绕过 PRECHECK，也没有在错误页继续坐标动作。`AREA_PICKER → AREA_MAP` 新版后置验证尚未取得真机样本。原始日志和截图仍只在 App/本机私有目录，公开仓库仅此脱敏摘要。
+
+---
+
 # REQ-0006 真机运行脱敏摘要 — 2026-09-25 续测
 
 - Pad 经 ADB 授权连接；游戏左、助手右的窗口布局已在截图中核验。两次已保存的私有 JSONL 会话均执行 PRECHECK，且检查项 9/9 通过；原始 sessionId、截图、JSONL 留在本机私有目录。
