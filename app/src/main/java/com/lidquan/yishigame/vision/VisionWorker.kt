@@ -23,6 +23,7 @@ data class VisionAnalysis(
     val ocrDurationMs: Long = 0,
     val pageDetectorDurationMs: Long = 0,
     val actionTargets: List<ActionTargetEvidence> = emptyList(),
+    val freeAttempts: CounterValue? = null,
     val progress: CounterValue? = null,
     val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
     val currentMap: String? = null,
@@ -42,6 +43,8 @@ class VisionWorker(
     private val stableTracker = StablePageTracker()
     private val recentDurations = ArrayDeque<Long>()
     private var job: Job? = null
+    private var generation = 0L
+    private var invalidatedThroughFrame = 0L
 
     fun start(scope: CoroutineScope, viewportVersion: () -> Long) {
         if (job?.isActive == true) return
@@ -51,13 +54,17 @@ class VisionWorker(
             val started = System.nanoTime()
             while (isActive) {
                 val frame = frameStore.latestSnapshot()
-                if (frame != null && frame.frameId != lastFrameId) {
+                if (frame != null && frame.frameId != lastFrameId && frame.frameId > invalidatedThroughFrame) {
+                    val analysisGeneration = generation
+                    val analysisVersion = viewportVersion()
+                    val observedAt = System.currentTimeMillis()
                     val before = System.nanoTime()
                     val result = withContext(Dispatchers.Default) { analyze(frame) }
+                    if (generation != analysisGeneration || viewportVersion() != analysisVersion) continue
                     val duration = (System.nanoTime() - before) / 1_000_000L
                     processed++
                     val seconds = (System.nanoTime() - started).coerceAtLeast(1L) / 1_000_000_000f
-                    val stable = stableTracker.add(result.detection, viewportVersion(), System.currentTimeMillis())
+                    val stable = stableTracker.add(result.detection, analysisVersion, observedAt)
                     recentDurations.addLast(duration)
                     while (recentDurations.size > 100) recentDurations.removeFirst()
                     val sorted = recentDurations.sorted()
@@ -74,6 +81,7 @@ class VisionWorker(
                         stablePage = stable,
                         freeAttemptState = result.freeAttemptState,
                         actionTargets = result.actionTargets.associate { it.id to it.rect },
+                        freeAttempts = result.freeAttempts,
                         progress = result.progress,
                         autoBattleState = result.autoBattleState,
                         currentMap = result.currentMap,
@@ -88,6 +96,8 @@ class VisionWorker(
     }
 
     fun invalidate() {
+        generation++
+        invalidatedThroughFrame = frameStore.metadata.value.frameId
         stableTracker.clear()
         recentDurations.clear()
         mutableMetrics.value = VisionMetrics()

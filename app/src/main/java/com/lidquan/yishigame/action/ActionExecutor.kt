@@ -18,16 +18,20 @@ class ActionExecutor(
     suspend fun execute(
         intent: ActionIntent,
         context: ActionContext,
+        onGuardDecision: (GuardDecision) -> Unit = {},
+        onTapDispatched: (ActionPlan, Boolean) -> Unit = { _, _ -> },
         awaitPage: suspend (expected: Set<String>, timeoutMs: Long) -> String?,
     ): ActionExecution {
         val startedAt = clock()
         val decision = ActionGuard.plan(intent, context)
+        onGuardDecision(decision)
         if (decision !is GuardDecision.AllowDryRun) {
             return ActionExecution(decision = decision, durationMs = (clock() - startedAt).coerceAtLeast(0))
         }
         val result = runCatching {
             controller.tap(decision.plan.tapPoint.x.toFloat(), decision.plan.tapPoint.y.toFloat())
         }.getOrDefault(false)
+        onTapDispatched(decision.plan, result)
         val pageAfter = if (result) awaitPage(decision.plan.expectedPageAfter, decision.plan.timeoutMs) else null
         return ActionExecution(
             decision = decision,

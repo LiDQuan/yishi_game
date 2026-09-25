@@ -1,3 +1,14 @@
+# REQ-0006 真机运行脱敏摘要 — 2026-09-25 续测
+
+- Pad 经 ADB 授权连接；游戏左、助手右的窗口布局已在截图中核验。两次已保存的私有 JSONL 会话均执行 PRECHECK，且检查项 9/9 通过；原始 sessionId、截图、JSONL 留在本机私有目录。
+- 会话 A：`PRECHECK_READY → WAIT_TARGET_ACTIVE → FAILED / ENVIRONMENT_CHANGED`；游戏未及时成为活动窗口，真实游戏业务 tap 为 0。
+- 会话 B：`PRECHECK_READY → RUNNING → DailyExecution RUNNING → HOME → OPEN_AREA_MAP (Guard ALLOW，Accessibility 接受) → AREA_MAP 在游戏中可见 → FAILED / ACTION_OPEN_AREA_MAP_BLOCKED_OR_UNVERIFIED`。视觉日志显示地图证据与背景战斗计数同时出现，导致 `Ambiguous`；本次代码已调整判定，但尚无该修复的真机回归结果。受控真实业务 tap 为 1 次。
+- 随后游戏反复出现“网络错误 / 已与服务器断开连接”，弹窗仅有“确定”。用户曾手动返回 HOME，但弹窗重现。新版 APK 已安装；重新安装造成辅助功能绑定与 MediaProjection 授权失效，未在新版完成 PRECHECK 或启动新业务会话。没有在断线弹窗上进行 ADB 游戏点击。用户已授权后续 Guard 控制的“确定”恢复动作，但运行中尚未验证。
+- 执行区域：会话 B 尚停在当前地图，未进入区域选择；历史受控会话曾切换目标区域，但后置条件失败。执行副本：未选定；免费次数：`UNKNOWN`；progress：未读取；自动战斗：未判定；自动返回 HOME：否；DailyExecution 最终 SUCCESS：否；同日 SKIPPED：否。断线发生；背包满未观察到。购买和付费确认 0 次。
+- 当前结论：**FAILED / 未完成 REQ-0006 验收**。必须待游戏稳定联网、重新获得两项系统授权后，从 HOME 重新 PRECHECK，逐步验证地图、区域、免费次数、战斗、HOME 与同日 SKIP，不得沿用旧证据。
+
+---
+
 # REQ-0006 真机运行脱敏摘要
 
 ## 2026-09-24 Precheck 续测

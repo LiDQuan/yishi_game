@@ -1,3 +1,15 @@
+# IMPLEMENT-0006 — 2026-09-25 续开发（未验收）
+
+本次继续在 `feat/req-0006-single-dungeon-loop` 开发；没有合入 main。修复视觉结果与 viewport 版本、点击后的旧帧竞争；动作后置条件要求新鲜稳定页及目标区域匹配。真机观察到打开区域地图后 `AREA_MAP` 与背景战斗计数同时命中、页面判定为 Ambiguous；现给 `BATTLE` 增加地图/选择器/副本页排除信号，并补 JVM 回归测试。此修复已构建安装，**尚未在联网游戏中完成 SELECT_AREA 回归**。
+
+实现了 PRECHECK 结构化检查、断线与背包满弹窗识别、受 `ActionIntent → ActionPolicy → ActionGuard → Accessibility tap` 限制的恢复动作、最多两次重试、恢复后重新识别页面，以及动作生命周期 JSONL 日志。用户本日明确授权断线弹窗只有“确定”时点击该按钮；仅在 `NETWORK_DISCONNECTED` 稳定页且 OCR 精确识别按钮时才形成目标。`PURCHASE` 仍为 `FORBIDDEN_AUTO`。原始截图与 JSONL 只留本机或 App 私有目录。
+
+真机有两次可审计的前序会话：一次 PRECHECK 9/9 通过后因游戏未激活以 `ENVIRONMENT_CHANGED` 结束、零业务点击；一次 PRECHECK 通过并由 Guard 放行 `OPEN_AREA_MAP`，游戏实际打开地图，但旧视觉配置将地图判为 Ambiguous，后置条件以 `ACTION_OPEN_AREA_MAP_BLOCKED_OR_UNVERIFIED` 结束。之后游戏反复显示“网络错误 / 已与服务器断开连接”，仅有“确定”，新版未能从 HOME 完成新 PRECHECK；没有继续业务点击。新断线恢复动作尚未真机验证。**SUCCESS：否；同日 SKIP：否。** 免费次数、progress、自动战斗、自动回 HOME 均无真实业务证据；背包满未发生。单副本 DailyExecution 仍使用 `first-free-dungeon` 占位键，不能宣称真实副本 ID 去重。
+
+验证：`assembleDebug`、`testDebugUnitTest`（56/56）、`connectedDebugAndroidTest`（5 项，4 通过、1 私有 fixture 缺失跳过）、`git diff --check` 和公开仓库历史安全扫描均通过。首次完整 SUCCESS 仍受游戏服务器断线及后续真机链路未验证阻塞。详细状态轨迹见运行摘要；下文为历史交接记录。
+
+---
+
 # IMPLEMENT-0006 — 未完成的真机开发交接
 
 ## 2026-09-24 启动前 Precheck 续测（仍未完成）

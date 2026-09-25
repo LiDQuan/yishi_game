@@ -1,3 +1,13 @@
+# 最新交接：REQ-0006 — 2026-09-25（未完成）
+
+当前分支 `feat/req-0006-single-dungeon-loop`，未合入 main。继续开发的实现包括 PRECHECK、旧 OCR/viewport 结果失效、地图与战斗页面判定冲突修复、断线及背包满受 Guard 控制的恢复、完整动作日志。用户已授权在明确断线弹窗中点击 OCR 识别的“确定”，仍须受 Guard、两次上限和后置条件约束。购买继续禁止自动执行。
+
+真机已有 PRECHECK 通过及一次受控打开地图；地图实际打开但旧构建将其判成 Ambiguous，后置条件失败。最新判定修复已通过自动测试并安装，游戏随后反复断线，未能完成新构建的业务验证。没有真实 SUCCESS、同日 SKIP、免费次数或战斗进度证据。背包满处理未发生。首个副本角标和详情免费次数待真机验收；自动战斗 OFF/MISSING 尚不能可靠区分；`currentDungeon` 未可靠提取，DailyExecution 使用 `first-free-dungeon` 占位 ID，仅适用临时单副本验证。
+
+验证：Debug 构建通过，56 个 JVM 测试通过，设备测试 4 通过/1 跳过，diff 检查及公开仓库安全扫描通过。下一步先恢复游戏服务器与助手辅助功能/MediaProjection，确认游戏左、助手右、HOME 与 viewport 匹配，再执行 PRECHECK；逐步验证 SELECT_AREA 后置条件，争取首个完整 SUCCESS 与同日 SKIP。详见 `codex/reports/IMPLEMENT-0006.md`、`codex/reports/runs/REQ-0006-run-summary.md` 和 `LATEST.patch`。
+
+---
+
 # 最新交接：REQ-0006（未完成）
 
 ## 2026-09-24 Precheck 续测更新

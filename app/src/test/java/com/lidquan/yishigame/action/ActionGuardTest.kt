@@ -49,4 +49,21 @@ class ActionGuardTest {
         val outside = safe.copy(actionTargets = mapOf("dungeon.start_free" to WindowBounds(90, 90, 110, 110)))
         assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(intent, outside) as GuardDecision.Deny).reason)
     }
+
+    @Test fun `recovery actions require their own explicit page and bounded target`() {
+        val reconnect = ActionIntent(ActionType.RECONNECT_GAME)
+        val sell = ActionIntent(ActionType.AUTO_SELL_INVENTORY)
+        val network = safe.copy(stablePage = safe.stablePage?.copy(pageId = "NETWORK_DISCONNECTED"),
+            actionTargets = mapOf("network.reconnect" to WindowBounds(10, 10, 20, 20)), freeAttemptState = FreeAttemptState.UNKNOWN)
+        assertTrue(ActionGuard.plan(reconnect, network) is GuardDecision.AllowDryRun)
+        assertEquals(GuardDenyReason.PAGE_NOT_ALLOWED, (ActionGuard.plan(sell, network) as GuardDecision.Deny).reason)
+        val inventory = network.copy(stablePage = network.stablePage?.copy(pageId = "INVENTORY_FULL"),
+            actionTargets = mapOf("inventory.auto_sell" to WindowBounds(10, 10, 20, 20)))
+        assertEquals(RiskLevel.SENSITIVE, ActionPolicyRegistry.policy(sell.type)?.riskLevel)
+        assertTrue(ActionGuard.plan(sell, inventory) is GuardDecision.AllowDryRun)
+        assertEquals(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT, (ActionGuard.plan(sell,
+            inventory.copy(actionTargets = mapOf("inventory.auto_sell" to WindowBounds(90, 90, 110, 110)))) as GuardDecision.Deny).reason)
+        assertEquals(GuardDenyReason.FREE_STATE_NOT_CONFIRMED,
+            (ActionGuard.plan(ActionIntent(ActionType.START_DUNGEON_FREE), safe.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) as GuardDecision.Deny).reason)
+    }
 }

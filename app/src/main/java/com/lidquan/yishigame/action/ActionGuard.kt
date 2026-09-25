@@ -13,6 +13,7 @@ enum class ActionType {
     OPEN_DUNGEON,
     OPEN_AREA_MAP, OPEN_AREA_SWITCH, SELECT_AREA, OPEN_DUNGEON_LIST,
     SELECT_DUNGEON, START_DUNGEON_FREE, ENABLE_AUTO_BATTLE,
+    RECONNECT_GAME, AUTO_SELL_INVENTORY,
     CLOSE_SAFE_DIALOG, PURCHASE,
 }
 enum class RiskLevel { SAFE, NORMAL, SENSITIVE, FORBIDDEN_AUTO }
@@ -39,6 +40,10 @@ object ActionPolicyRegistry {
         ActionType.SELECT_DUNGEON to ActionPolicy(RiskLevel.NORMAL, setOf("DUNGEON_LIST"), "dungeon.candidate", setOf("DUNGEON_DETAIL")),
         ActionType.START_DUNGEON_FREE to ActionPolicy(RiskLevel.SENSITIVE, setOf("DUNGEON_DETAIL"), "dungeon.start_free", setOf("BATTLE", "LOADING")),
         ActionType.ENABLE_AUTO_BATTLE to ActionPolicy(RiskLevel.NORMAL, setOf("BATTLE"), "battle.auto", setOf("BATTLE")),
+        ActionType.RECONNECT_GAME to ActionPolicy(RiskLevel.NORMAL, setOf("NETWORK_DISCONNECTED"), "network.reconnect",
+            setOf("HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE")),
+        ActionType.AUTO_SELL_INVENTORY to ActionPolicy(RiskLevel.SENSITIVE, setOf("INVENTORY_FULL"), "inventory.auto_sell",
+            setOf("HOME", "AREA_MAP", "AREA_PICKER", "DUNGEON_LIST", "DUNGEON_DETAIL", "BATTLE")),
         ActionType.CLOSE_SAFE_DIALOG to ActionPolicy(RiskLevel.SAFE, setOf("SAFE_DIALOG"), "dialog.close", setOf("CHARACTER_SELECT", "HOME", "AREA_MAP")),
         ActionType.PURCHASE to ActionPolicy(RiskLevel.FORBIDDEN_AUTO, emptySet(), "purchase.confirm", emptySet()),
     )
@@ -98,7 +103,7 @@ object ActionGuard {
         val rect = context.actionTargets[policy.requiredTargetId] ?: return deny(GuardDenyReason.TARGET_NOT_CONFIRMED)
         if (!viewport.contains(rect)) return deny(GuardDenyReason.TARGET_OUTSIDE_VIEWPORT)
         if (policy.riskLevel == RiskLevel.SENSITIVE) {
-            if (context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
+            if (intent.type == ActionType.START_DUNGEON_FREE && context.freeAttemptState != FreeAttemptState.AVAILABLE) return deny(GuardDenyReason.FREE_STATE_NOT_CONFIRMED)
             if (context.dailyAlreadySuccess) return deny(GuardDenyReason.DAILY_ALREADY_SUCCESS)
             if (context.purchaseSignalPresent) return deny(GuardDenyReason.PURCHASE_SIGNAL_PRESENT)
         }
@@ -109,7 +114,7 @@ object ActionGuard {
                 ScreenPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
                 page.pageId,
                 policy.expectedPagesAfter,
-                if (intent.type == ActionType.SELECT_AREA) 30_000L else 15_000L,
+                15_000L,
             ),
             listOf("ALL_PRECONDITIONS_CONFIRMED"),
         )

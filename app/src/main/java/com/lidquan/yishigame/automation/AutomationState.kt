@@ -38,6 +38,7 @@ sealed interface AutomationEvent {
     data object TargetActivated : AutomationEvent
     data object TargetActivationTimedOut : AutomationEvent
     data object RequestResume : AutomationEvent
+    data object RunFinished : AutomationEvent
     data object Pause : AutomationEvent
     data class EnvironmentChanged(val reason: EnvironmentChangeReason) : AutomationEvent
     data object Stop : AutomationEvent

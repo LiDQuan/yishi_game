@@ -37,6 +37,7 @@ data class RegexOcrSignalDefinition(
     val pattern: Regex,
     val actionTargetId: String? = null,
     val actionTargetRoi: NormalizedRect? = null,
+    val evidenceConfidence: Float? = null,
 )
 
 data class TemplateSignalDefinition(
@@ -108,11 +109,12 @@ class ConfiguredVisionEngine(
             val lines = linesIn(roi)
             val match = lines.firstOrNull { signal.pattern.containsMatchIn(it.normalizedText) }
             if (match != null) {
-                evidence += OcrEvidence(signal.id, match.text, match.normalizedText, match.confidence, match.rect)
+                val confidence = signal.evidenceConfidence ?: match.confidence
+                evidence += OcrEvidence(signal.id, match.text, match.normalizedText, confidence, match.rect)
                 if (signal.actionTargetId != null) {
                     actionTargets += ActionTargetEvidence(
                         signal.actionTargetId,
-                        match.confidence,
+                        confidence,
                         signal.actionTargetRoi?.let { ViewportMapper.toScreen(it, currentViewport) } ?: match.rect,
                     )
                 }
@@ -132,11 +134,18 @@ class ConfiguredVisionEngine(
             actionTargets += ActionTargetEvidence("battle.auto", 0.85f, autoRect)
         }
         val detectorStarted = System.nanoTime()
-        val detection = detector.detect(evidence)
+        // Explicit modal evidence takes priority over the visible page behind it.
+        val modal = when {
+            evidence.any { it.id == "network.title" } -> "NETWORK_DISCONNECTED"
+            evidence.any { it.id == "inventory.title" } -> "INVENTORY_FULL"
+            else -> null
+        }
+        val detection = detector.detect(evidence, modal?.let { setOf(it) })
         val detectorMs = (System.nanoTime() - detectorStarted) / 1_000_000L
         return VisionAnalysis(
             detection = detection,
             freeAttemptState = freeState,
+            freeAttempts = freeAttemptOcr.mapNotNull { parseCounter(it.normalizedText, "免费") }.distinct().singleOrNull(),
             templateDurationMs = templateNanos / 1_000_000L,
             ocrDurationMs = ocrNanos / 1_000_000L,
             pageDetectorDurationMs = detectorMs,
@@ -216,6 +225,8 @@ fun initialVisionConfiguration(): VisionConfiguration {
             page("SETTINGS", "settings"),
             page("CHARACTER_SELECT", "character"),
             page("SAFE_DIALOG", "dialog"),
+            PageDefinition("NETWORK_DISCONNECTED", 1, listOf(SignalRule("network.title", 0.8f)), threshold = 0.85f, minimumMargin = 0.1f),
+            PageDefinition("INVENTORY_FULL", 1, listOf(SignalRule("inventory.title", 0.8f)), threshold = 0.85f, minimumMargin = 0.1f),
             page("HOME", "home"),
             page("AREA_MAP", "area", negative = listOf(SignalRule("area_picker.anchor", 0.8f))),
             page("AREA_PICKER", "area_picker"),
@@ -223,21 +234,30 @@ fun initialVisionConfiguration(): VisionConfiguration {
                 required = listOf(SignalRule("dungeon.title", 0.8f), SignalRule("dungeon.badge.first", 0.8f)),
                 threshold = 0.85f, minimumMargin = 0.1f),
             page("DUNGEON_DETAIL", "detail"),
-            page("BATTLE", "battle"),
+            page("BATTLE", "battle", negative = listOf(SignalRule("home.title", 0.8f), SignalRule("area.title", 0.8f),
+                SignalRule("area_picker.title", 0.8f), SignalRule("dungeon.title", 0.8f), SignalRule("detail.title", 0.8f))),
         ),
         semanticOcrSignals = listOf(
             SemanticOcrSignalDefinition("detail.free", NormalizedRect(0.20f, 0.52f, 0.80f, 0.85f), SemanticOcrSignalType.FREE_ATTEMPT),
             SemanticOcrSignalDefinition("battle.progress", NormalizedRect(0.25f, 0.00f, 0.75f, 0.20f), SemanticOcrSignalType.PROGRESS),
         ),
         regexOcrSignals = listOf(
+            RegexOcrSignalDefinition("network.title", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
+                Regex("网络错误|(?:网络|服务器).*(?:断开|中断|连接失败|连接异常|无法连接)|已与服务器断开连接"), evidenceConfidence = 0.9f),
+            RegexOcrSignalDefinition("network.anchor", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
+                Regex("^(?:重连|重新连接|点击重连|确定)$"), "network.reconnect", evidenceConfidence = 0.9f),
+            RegexOcrSignalDefinition("inventory.title", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
+                Regex("背包.*(?:已满|满了|空间不足)"), evidenceConfidence = 0.9f),
+            RegexOcrSignalDefinition("inventory.anchor", NormalizedRect(0.12f, 0.20f, 0.88f, 0.78f),
+                Regex("^自动出售$"), "inventory.auto_sell", evidenceConfidence = 0.9f),
             RegexOcrSignalDefinition("dialog.title", NormalizedRect(0.20f, 0.25f, 0.80f, 0.60f), Regex("更新|网络错误")),
-            RegexOcrSignalDefinition("home.dungeon", NormalizedRect(0.20f, 0.00f, 0.80f, 0.16f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), "home.dungeon"),
+            RegexOcrSignalDefinition("home.dungeon", NormalizedRect(0.20f, 0.00f, 0.80f, 0.16f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), "home.dungeon", evidenceConfidence = 0.9f),
             RegexOcrSignalDefinition(
                 "dungeon.badge.first", NormalizedRect(0.34f, 0.30f, 0.42f, 0.38f),
                 Regex("^[1-9]$"), "dungeon.candidate",
-                NormalizedRect(0.23f, 0.32f, 0.39f, 0.40f),
+                NormalizedRect(0.23f, 0.32f, 0.39f, 0.40f), evidenceConfidence = 0.9f,
             ),
-            RegexOcrSignalDefinition("battle.title", NormalizedRect(0.20f, 0.00f, 0.80f, 0.18f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])")),
+            RegexOcrSignalDefinition("battle.title", NormalizedRect(0.20f, 0.00f, 0.80f, 0.18f), Regex("(?:^|[^0-9])\\d{1,2}/\\d{1,2}(?:$|[^0-9])"), evidenceConfidence = 0.9f),
         ),
     )
 }

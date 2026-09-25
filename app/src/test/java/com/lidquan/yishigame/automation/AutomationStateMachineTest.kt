@@ -6,6 +6,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AutomationStateMachineTest {
+    @Test fun `finished session permits a new precheck without retaining running state`() {
+        val machine = AutomationStateMachine(AutomationState.RUNNING_PLACEHOLDER)
+        assertTrue(machine.dispatch(AutomationEvent.RunFinished))
+        assertEquals(AutomationState.READY, machine.state.value)
+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
+        assertFalse(machine.dispatch(AutomationEvent.RunFinished))
+    }
+
+    @Test
+    fun `environment check can retry after permission is granted`() {
+        val machine = AutomationStateMachine()
+
+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
+        assertTrue(machine.dispatch(AutomationEvent.PermissionMissing))
+        assertEquals(AutomationState.PERMISSION_REQUIRED, machine.state.value)
+        assertTrue(machine.dispatch(AutomationEvent.StartPrecheck))
+        assertTrue(machine.dispatch(AutomationEvent.DeviceReady))
+        assertTrue(machine.dispatch(AutomationEvent.CheckWindow))
+        assertTrue(machine.dispatch(AutomationEvent.WindowVerified))
+        assertEquals(AutomationState.READY, machine.state.value)
+    }
+
     @Test
     fun `arming waits for target activation before reaching placeholder`() {
         val machine = AutomationStateMachine()

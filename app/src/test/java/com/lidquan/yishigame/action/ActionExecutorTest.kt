@@ -26,16 +26,21 @@ class ActionExecutorTest {
     @Test fun `executor taps only after guard allow and verifies postcondition`() = runTest {
         val controller = FakeController()
         val executor = ActionExecutor(controller) { 1_500 }
+        val events = mutableListOf<String>()
         val context = ActionContext(
             AutomationState.RUNNING_PLACEHOLDER, true, ScreenCaptureState.Active(1, 1, 1), true, true,
             WindowGate.MATCHED, WindowBounds(0, 0, 100, 100), StablePage("DUNGEON_DETAIL", .9f, 1_000, 1),
             1, 1_500, actionTargets = mapOf("dungeon.start_free" to WindowBounds(10, 10, 20, 20)),
             freeAttemptState = FreeAttemptState.AVAILABLE,
         )
-        val allowed = executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context) { _, _ -> "BATTLE" }
+        val allowed = executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context,
+            onGuardDecision = { events += if (it is GuardDecision.AllowDryRun) "ALLOW" else "DENY" },
+            onTapDispatched = { _, accepted -> events += "DISPATCH:$accepted" },
+        ) { _, _ -> "BATTLE" }
         assertEquals(true, allowed.tapResult)
         assertEquals(true, allowed.postconditionMet)
         assertEquals(1, controller.taps)
+        assertEquals(listOf("ALLOW", "DISPATCH:true"), events)
         assertNull(executor.execute(ActionIntent(ActionType.START_DUNGEON_FREE), context.copy(freeAttemptState = FreeAttemptState.UNKNOWN)) { _, _ -> "BATTLE" }.tapResult)
         assertEquals(1, controller.taps)
     }

@@ -62,6 +62,7 @@ data class VisionMetrics(
     val stablePage: StablePage? = null,
     val freeAttemptState: FreeAttemptState = FreeAttemptState.UNKNOWN,
     val actionTargets: Map<String, WindowBounds> = emptyMap(),
+    val freeAttempts: CounterValue? = null,
     val progress: CounterValue? = null,
     val autoBattleState: AutoBattleState = AutoBattleState.UNKNOWN,
     val currentMap: String? = null,
