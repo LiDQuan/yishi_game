@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lidquan.yishigame.EnvironmentUiState
 import com.lidquan.yishigame.MainViewModel
+import com.lidquan.yishigame.vision.fingerprintPages
 import com.lidquan.yishigame.automation.AutomationState
 import com.lidquan.yishigame.automation.RecoveryRequirement
 import com.lidquan.yishigame.capture.ScreenCaptureState
@@ -45,6 +46,8 @@ fun AssistantApp(
     val state by viewModel.uiState.collectAsState()
     var showDiagnostics by remember { mutableStateOf(false) }
     var showVision by remember { mutableStateOf(false) }
+    var showCalibration by remember { mutableStateOf(false) }
+    val calibration by viewModel.calibration.collectAsState()
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -60,6 +63,7 @@ fun AssistantApp(
                             onRequestCapture = onRequestCapture,
                             onShowDiagnostics = { showDiagnostics = true },
                             onShowVision = { showVision = true },
+                            onShowCalibration = { showCalibration = true },
                         )
                     }
                 } else {
@@ -76,6 +80,7 @@ fun AssistantApp(
                             onRequestCapture = onRequestCapture,
                             onShowDiagnostics = { showDiagnostics = true },
                             onShowVision = { showVision = true },
+                            onShowCalibration = { showCalibration = true },
                         )
                     }
                 }
@@ -125,6 +130,39 @@ fun AssistantApp(
             },
         )
     }
+    if (showCalibration) {
+        val page = fingerprintPages[calibration.pageIndex]
+        AlertDialog(
+            onDismissRequest = { showCalibration = false },
+            confirmButton = { TextButton(onClick = { showCalibration = false }) { Text("关闭") } },
+            title = { Text("页面指纹标定") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("当前请求：${page.displayNameZh}（${page.pageId}）")
+                    Text(page.descriptionZh)
+                    Text(page.enterHintZh)
+                    Text("状态：${calibration.status} · 帧数：${calibration.frameCount}/30")
+                    Text("候选稳定点：${calibration.candidateCount} · 最终指纹点：${calibration.pointCount}")
+                    Text("自身稳定命中率：${calibration.selfMatchRate?.let { "%.0f%%".format(it * 100) } ?: "待采样"}")
+                    Button(onClick = viewModel::sampleFingerprintPage, modifier = Modifier.fillMaxWidth()) { Text("已打开，开始采样当前页面") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }) { Text("无此界面") }
+                        OutlinedButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }) { Text("瞬时界面") }
+                    }
+                    Text("已保存：${calibration.savedPages.joinToString().ifEmpty { "无" }}")
+                    Text("无此界面／瞬时界面：${calibration.unavailablePages.entries.joinToString { "${it.key}=${it.value}" }.ifEmpty { "无" }}")
+                    Text("实时识别：${calibration.recognizedPage?.let { id -> fingerprintPages.find { it.pageId == id }?.displayNameZh } ?: "未知页面"}")
+                    calibration.scores.toList().sortedByDescending { it.second }.forEach { (id, score) ->
+                        Text("${fingerprintPages.find { it.pageId == id }?.displayNameZh ?: id}：${"%.0f%%".format(score * 100)}")
+                    }
+                    Text("选择待采样页面：")
+                    fingerprintPages.forEachIndexed { index, candidate ->
+                        TextButton(onClick = { viewModel.selectFingerprintPage(index) }) { Text(candidate.displayNameZh) }
+                    }
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -162,6 +200,7 @@ private fun Controls(
     onRequestCapture: () -> Unit,
     onShowDiagnostics: () -> Unit,
     onShowVision: () -> Unit,
+    onShowCalibration: () -> Unit,
 ) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -203,6 +242,7 @@ private fun Controls(
             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
             TextButton(onClick = onShowVision, modifier = Modifier.fillMaxWidth()) { Text("Vision Debug（只读）") }
+            TextButton(onClick = onShowCalibration, modifier = Modifier.fillMaxWidth()) { Text("页面指纹标定") }
         }
     }
 }
