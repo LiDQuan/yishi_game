@@ -10,12 +10,12 @@ import kotlin.math.abs
 data class FingerprintPage(val pageId: String, val displayNameZh: String, val descriptionZh: String, val enterHintZh: String)
 
 val fingerprintPages = listOf(
-    FingerprintPage("HOME", "游戏主页", "显示角色、底部导航和主城入口的常驻页面", "请返回游戏主页并保持不动"),
+    FingerprintPage("HOME", "游戏主页", "本地图自动打小怪的常驻画面，显示技能栏和底部导航；地图小怪进度也属于主页", "请回到日常挂机打地图小怪的画面，保持窗口位置不变"),
     FingerprintPage("AREA_MAP", "区域地图界面", "显示当前区域和地下城入口的地图页面", "请从游戏主页进入区域地图"),
     FingerprintPage("AREA_PICKER", "区域选择界面", "显示多个区域名称供选择的页面", "请从区域地图点击“切换区域”"),
     FingerprintPage("DUNGEON_LIST", "地下城列表界面", "列出可选地下城的页面", "请从区域地图点击“地下城”"),
     FingerprintPage("DUNGEON_DETAIL", "地下城详情界面", "显示免费次数和“前往”按钮的页面", "请在地下城列表中打开一个副本详情"),
-    FingerprintPage("BATTLE", "战斗界面", "显示战斗进度和自动战斗状态的页面", "请进入一次战斗"),
+    FingerprintPage("BATTLE", "副本战斗界面", "进入地下城副本后的战斗画面；与主页的地图小怪区分", "仅在你自行进入免费副本后采集，不要为采样购买次数"),
     FingerprintPage("NETWORK_DISCONNECTED", "服务器断开连接提示界面", "显示服务器断线或网络错误提示的弹窗", "请在该提示自然出现时停留"),
     FingerprintPage("BAG_FULL", "背包已满提示界面", "显示背包已满和自动出售按钮的提示", "请在该提示自然出现时停留"),
     FingerprintPage("CHARACTER_SELECT", "角色选择界面", "显示可选择角色的页面", "请从游戏入口进入角色选择"),

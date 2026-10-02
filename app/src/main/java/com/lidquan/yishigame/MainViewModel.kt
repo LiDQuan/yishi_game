@@ -136,6 +136,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
     private val fingerprintStore = PixelFingerprintStore(appContext.filesDir.resolve("pixel-fingerprints"))
     private val mutableCalibration = MutableStateFlow(FingerprintCalibrationState(
+        pageIndex = preferences.getInt("recording-page-index", 0).coerceIn(fingerprintPages.indices),
         savedPages = fingerprintStore.loadAll().map { it.pageId },
         unavailablePages = fingerprintPages.mapNotNull { page -> preferences.getString("fingerprint-status-${page.pageId}", null)?.let { page.pageId to it } }.toMap(),
     ))
@@ -144,6 +145,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var recordingJob: Job? = null
     private val mutableRecordingStatus = MutableStateFlow("未开始采集")
     val recordingStatus: StateFlow<String> = mutableRecordingStatus.asStateFlow()
+    private val mutableRecordingActive = MutableStateFlow(false)
+    val recordingActive: StateFlow<Boolean> = mutableRecordingActive.asStateFlow()
+    private val mutableRecordedPages = MutableStateFlow(fingerprintPages.associate { it.pageId to preferences.getInt("recorded-${it.pageId}", 0) })
+    val recordedPages: StateFlow<Map<String, Int>> = mutableRecordedPages.asStateFlow()
 
     fun startCalibrationRecording() {
         if (recordingJob?.isActive == true) return
@@ -151,15 +156,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             mutableRecordingStatus.value = "请先点击屏幕采集授权，选择整个屏幕，再开始采集"
             return
         }
+        val requestedPage = fingerprintPages[mutableCalibration.value.pageIndex]
+        mutableRecordingActive.value = true
         recordingJob = viewModelScope.launch {
             var saved = 0
             try {
                 for (seconds in 3 downTo 1) {
-                    mutableRecordingStatus.value = "${seconds} 秒后开始，请切回游戏自由操作"
+                    mutableRecordingStatus.value = "${seconds} 秒后开始，请保持【${requestedPage.displayNameZh}】，不要切换页面"
                     delay(1000)
                 }
-                val directory = appContext.filesDir.resolve("calibration-recordings/${System.currentTimeMillis()}")
-                withContext(Dispatchers.IO) { check(directory.mkdirs()) }
+                val directory = appContext.filesDir.resolve("calibration-recordings/${System.currentTimeMillis()}-${requestedPage.pageId}")
+                withContext(Dispatchers.IO) {
+                    check(directory.mkdirs())
+                    directory.resolve("page.json").writeText(org.json.JSONObject()
+                        .put("requestedPageId", requestedPage.pageId).put("displayNameZh", requestedPage.displayNameZh)
+                        .put("labelSource", "USER_SELECTED").put("recognitionVerified", false).toString())
+                }
                 var lastFrameId = -1L
                 val started = android.os.SystemClock.elapsedRealtime()
                 for (index in 0 until 30) {
@@ -179,12 +191,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     mutableRecordingStatus.value = "采集中：已保存 ${saved} 张，进度 ${index + 1}/30 秒"
                 }
-                mutableRecordingStatus.value = "采集完成：${saved} 张，已保存在助手私有目录。可以告诉 Codex 查看。"
+                if (saved > 0) {
+                    preferences.edit().putInt("recorded-${requestedPage.pageId}", saved).remove("fingerprint-status-${requestedPage.pageId}").apply()
+                    mutableRecordedPages.value = mutableRecordedPages.value + (requestedPage.pageId to saved)
+                    mutableCalibration.value = mutableCalibration.value.copy(unavailablePages = mutableCalibration.value.unavailablePages - requestedPage.pageId)
+                }
+                mutableRecordingStatus.value = "【${requestedPage.displayNameZh}】已保存 ${saved} 张，待检查。可点“下一页”查看下一项提示。"
             } catch (cancelled: CancellationException) {
                 mutableRecordingStatus.value = "已停止：保留已保存的 ${saved} 张图片"
                 throw cancelled
             } catch (_: Exception) {
                 mutableRecordingStatus.value = "采集中断：已保存 ${saved} 张，请检查屏幕采集状态和存储空间"
+            } finally {
+                mutableRecordingActive.value = false
             }
         }
     }
@@ -221,12 +240,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectFingerprintPage(index: Int) {
-        if (samplingJob?.isActive == true || index !in fingerprintPages.indices) return
+        if (samplingJob?.isActive == true || recordingJob?.isActive == true || index !in fingerprintPages.indices) return
+        mutableRecordingStatus.value = "请按提示打开页面，再点击采集"
+        preferences.edit().putInt("recording-page-index", index).apply()
         mutableCalibration.value = mutableCalibration.value.copy(pageIndex = index, status = "等待打开页面", frameCount = 0, candidateCount = 0, pointCount = 0, selfMatchRate = null)
     }
 
     fun markFingerprintPage(status: String) {
-        if (samplingJob?.isActive == true || status !in setOf("NOT_PRESENT", "TRANSIENT")) return
+        if (samplingJob?.isActive == true || recordingJob?.isActive == true || status !in setOf("NOT_PRESENT", "TRANSIENT")) return
         val page = fingerprintPages[mutableCalibration.value.pageIndex]
         preferences.edit().putString("fingerprint-status-${page.pageId}", status).apply()
         mutableCalibration.value = mutableCalibration.value.copy(status = if (status == "NOT_PRESENT") "无此界面" else "瞬时界面",

@@ -49,19 +49,37 @@ fun AssistantApp(
     var showCalibration by remember { mutableStateOf(false) }
     val calibration by viewModel.calibration.collectAsState()
     val recordingStatus by viewModel.recordingStatus.collectAsState()
+    val recordingActive by viewModel.recordingActive.collectAsState()
+    val recordedPages by viewModel.recordedPages.collectAsState()
+    var showPageList by remember { mutableStateOf(false) }
+    val requestedPage = fingerprintPages[calibration.pageIndex]
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(24.dp)) {
                 val wideLayout = maxWidth >= 840.dp
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("手动操作截图采集", style = MaterialTheme.typography.titleLarge)
-                    Text("倒计时 3 秒，每秒 1 张，共 30 秒。请自行操作游戏；图片仅保存在助手私有目录。")
+                    Text("逐页采集 · ${calibration.pageIndex + 1}/${fingerprintPages.size}：${requestedPage.displayNameZh}", style = MaterialTheme.typography.titleLarge)
+                    Text(requestedPage.descriptionZh)
+                    Text("如何打开：${requestedPage.enterHintZh}")
+                    Text("打开后点击采集，倒计时 3 秒后保持此页 30 秒，不要切换。图片仅保存在助手私有目录。")
+                    Text("本页：" + when (calibration.unavailablePages[requestedPage.pageId]) {
+                        "NOT_PRESENT" -> "已标记无此界面"
+                        "TRANSIENT" -> "已标记瞬时界面"
+                        else -> recordedPages[requestedPage.pageId]?.takeIf { it > 0 }?.let { "已保存 ${it} 张，待检查" } ?: "待采集"
+                    })
                     Text(recordingStatus)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active) { Text("屏幕采集授权") }
-                        Button(onClick = viewModel::startCalibrationRecording) { Text("开始采集") }
-                        OutlinedButton(onClick = viewModel::stopCalibrationRecording) { Text("停止采集") }
+                        Button(onClick = viewModel::startCalibrationRecording, enabled = !recordingActive) { Text("已打开，采集此页") }
+                        OutlinedButton(onClick = viewModel::stopCalibrationRecording, enabled = recordingActive) { Text("停止") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex - 1) }, enabled = !recordingActive && calibration.pageIndex > 0) { Text("上一页") }
+                        TextButton(onClick = { showPageList = true }, enabled = !recordingActive) { Text("全部页面") }
+                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex + 1) }, enabled = !recordingActive && calibration.pageIndex < fingerprintPages.lastIndex) { Text("下一页") }
+                        TextButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }, enabled = !recordingActive) { Text("无此界面") }
+                        TextButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }, enabled = !recordingActive) { Text("瞬时界面") }
                     }
                 if (wideLayout) {
                     Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
@@ -100,6 +118,22 @@ fun AssistantApp(
         }
     }
 
+    if (showPageList) {
+        AlertDialog(onDismissRequest = { showPageList = false }, title = { Text("需要采集的页面") },
+            confirmButton = { TextButton(onClick = { showPageList = false }) { Text("关闭") } },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                fingerprintPages.forEachIndexed { index, page ->
+                    val label = when (calibration.unavailablePages[page.pageId]) {
+                        "NOT_PRESENT" -> "无此界面"
+                        "TRANSIENT" -> "瞬时界面"
+                        else -> if ((recordedPages[page.pageId] ?: 0) > 0) "已采集，待检查" else "待采集"
+                    }
+                    TextButton(onClick = { viewModel.selectFingerprintPage(index); showPageList = false }) {
+                        Text("${index + 1}. ${page.displayNameZh} · $label")
+                    }
+                }
+            } })
+    }
     if (showDiagnostics) {
         AlertDialog(
             onDismissRequest = { showDiagnostics = false },
