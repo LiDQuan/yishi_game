@@ -141,6 +141,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ))
     val calibration: StateFlow<FingerprintCalibrationState> = mutableCalibration.asStateFlow()
     private var samplingJob: Job? = null
+    private var recordingJob: Job? = null
+    private val mutableRecordingStatus = MutableStateFlow("未开始采集")
+    val recordingStatus: StateFlow<String> = mutableRecordingStatus.asStateFlow()
+
+    fun startCalibrationRecording() {
+        if (recordingJob?.isActive == true) return
+        if (captureController.state.value !is ScreenCaptureState.Active) {
+            mutableRecordingStatus.value = "请先点击屏幕采集授权，选择整个屏幕，再开始采集"
+            return
+        }
+        recordingJob = viewModelScope.launch {
+            var saved = 0
+            try {
+                for (seconds in 3 downTo 1) {
+                    mutableRecordingStatus.value = "${seconds} 秒后开始，请切回游戏自由操作"
+                    delay(1000)
+                }
+                val directory = appContext.filesDir.resolve("calibration-recordings/${System.currentTimeMillis()}")
+                withContext(Dispatchers.IO) { check(directory.mkdirs()) }
+                var lastFrameId = -1L
+                val started = android.os.SystemClock.elapsedRealtime()
+                for (index in 0 until 30) {
+                    delay((started + index * 1000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                    check(captureController.state.value is ScreenCaptureState.Active)
+                    val frame = captureController.frameStore.latestSnapshot() ?: error("NO_FRAME")
+                    if (frame.frameId != lastFrameId) {
+                        withContext(Dispatchers.IO) {
+                            val name = "%02d.png".format(index + 1)
+                            com.lidquan.yishigame.capture.saveCalibrationFrame(frame, directory.resolve(name))
+                            directory.resolve("frames.jsonl").appendText(org.json.JSONObject()
+                                .put("file", name).put("frameId", frame.frameId).put("timestampNanos", frame.timestampNanos)
+                                .put("width", frame.width).put("height", frame.height).toString() + "\n")
+                        }
+                        lastFrameId = frame.frameId
+                        saved++
+                    }
+                    mutableRecordingStatus.value = "采集中：已保存 ${saved} 张，进度 ${index + 1}/30 秒"
+                }
+                mutableRecordingStatus.value = "采集完成：${saved} 张，已保存在助手私有目录。可以告诉 Codex 查看。"
+            } catch (cancelled: CancellationException) {
+                mutableRecordingStatus.value = "已停止：保留已保存的 ${saved} 张图片"
+                throw cancelled
+            } catch (_: Exception) {
+                mutableRecordingStatus.value = "采集中断：已保存 ${saved} 张，请检查屏幕采集状态和存储空间"
+            }
+        }
+    }
+
+    fun stopCalibrationRecording() { recordingJob?.cancel() }
 
     init {
         RunLogger.finalizeOrphanedSessions(appContext)

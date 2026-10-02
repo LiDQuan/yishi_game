@@ -48,11 +48,22 @@ fun AssistantApp(
     var showVision by remember { mutableStateOf(false) }
     var showCalibration by remember { mutableStateOf(false) }
     val calibration by viewModel.calibration.collectAsState()
+    val recordingStatus by viewModel.recordingStatus.collectAsState()
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(24.dp)) {
-                if (maxWidth >= 840.dp) {
+                val wideLayout = maxWidth >= 840.dp
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("手动操作截图采集", style = MaterialTheme.typography.titleLarge)
+                    Text("倒计时 3 秒，每秒 1 张，共 30 秒。请自行操作游戏；图片仅保存在助手私有目录。")
+                    Text(recordingStatus)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active) { Text("屏幕采集授权") }
+                        Button(onClick = viewModel::startCalibrationRecording) { Text("开始采集") }
+                        OutlinedButton(onClick = viewModel::stopCalibrationRecording) { Text("停止采集") }
+                    }
+                if (wideLayout) {
                     Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                         Overview(state, Modifier.weight(1f))
                         Controls(
@@ -83,6 +94,7 @@ fun AssistantApp(
                             onShowCalibration = { showCalibration = true },
                         )
                     }
+                }
                 }
             }
         }
