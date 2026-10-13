@@ -46,11 +46,10 @@ fun AssistantApp(
     val state by viewModel.uiState.collectAsState()
     var showDiagnostics by remember { mutableStateOf(false) }
     var showVision by remember { mutableStateOf(false) }
-    var showCalibration by remember { mutableStateOf(false) }
     val calibration by viewModel.calibration.collectAsState()
     val recordingStatus by viewModel.recordingStatus.collectAsState()
     val recordingActive by viewModel.recordingActive.collectAsState()
-    val recordedPages by viewModel.recordedPages.collectAsState()
+    var showRecordingDebug by remember { mutableStateOf(false) }
     var showPageList by remember { mutableStateOf(false) }
     val requestedPage = fingerprintPages[calibration.pageIndex]
 
@@ -58,61 +57,64 @@ fun AssistantApp(
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(24.dp)) {
                 val wideLayout = maxWidth >= 840.dp
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("逐页采集 · ${calibration.pageIndex + 1}/${fingerprintPages.size}：${requestedPage.displayNameZh}", style = MaterialTheme.typography.titleLarge)
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("页面指纹标定 · ${calibration.pageIndex + 1}/${fingerprintPages.size}：${requestedPage.displayNameZh}", style = MaterialTheme.typography.titleLarge)
+                    Text("内部 ID：${requestedPage.pageId}")
                     Text(requestedPage.descriptionZh)
                     Text("如何打开：${requestedPage.enterHintZh}")
-                    Text("打开后点击采集，倒计时 3 秒后保持此页 30 秒，不要切换。图片仅保存在助手私有目录。")
-                    Text("本页：" + when (calibration.unavailablePages[requestedPage.pageId]) {
-                        "NOT_PRESENT" -> "已标记无此界面"
-                        "TRANSIENT" -> "已标记瞬时界面"
-                        else -> recordedPages[requestedPage.pageId]?.takeIf { it > 0 }?.let { "已保存 ${it} 张，待检查" } ?: "待采集"
-                    })
-                    Text(recordingStatus)
+                    Text("打开后点击采集，保持本页约 2～5 秒；采集 30 个新帧并直接生成指纹。")
+                    Text("状态：${calibration.status} · 真实帧数：${calibration.frameCount}/30")
+                    Text("候选稳定点：${calibration.candidateCount} · 最终点数：${calibration.pointCount}")
+                    Text("自身命中率：${calibration.selfMatchRate?.let { "%.1f%%".format(it * 100) } ?: "待采样"}")
+                    Text("其他页面最高得分：${calibration.highestOtherScore?.let { "%.1f%%".format(it * 100) } ?: "待采样"} · 分差：${calibration.scoreMargin?.let { "%.1f 个百分点".format(it * 100) } ?: "待采样"}")
+                    if (calibration.selfMatchRate != null && calibration.otherPageCount == 0) Text("这是首个页面，跨页面区分需等待其他页面采集后验证。")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active) { Text("屏幕采集授权") }
-                        Button(onClick = viewModel::startCalibrationRecording, enabled = !recordingActive) { Text("已打开，采集此页") }
-                        OutlinedButton(onClick = viewModel::stopCalibrationRecording, enabled = recordingActive) { Text("停止") }
+                        Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active && !calibration.isSampling) { Text("屏幕采集授权") }
+                        Button(onClick = viewModel::sampleFingerprintPage, enabled = !calibration.isSampling && !recordingActive) { Text("已打开，开始采集") }
+                        OutlinedButton(onClick = viewModel::stopFingerprintSampling, enabled = calibration.isSampling) { Text("停止") }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex - 1) }, enabled = !recordingActive && calibration.pageIndex > 0) { Text("上一页") }
-                        TextButton(onClick = { showPageList = true }, enabled = !recordingActive) { Text("全部页面") }
-                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex + 1) }, enabled = !recordingActive && calibration.pageIndex < fingerprintPages.lastIndex) { Text("下一页") }
-                        TextButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }, enabled = !recordingActive) { Text("无此界面") }
-                        TextButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }, enabled = !recordingActive) { Text("瞬时界面") }
+                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex - 1) }, enabled = !calibration.isSampling && !recordingActive && calibration.pageIndex > 0) { Text("上一页") }
+                        TextButton(onClick = { showPageList = true }, enabled = !calibration.isSampling && !recordingActive) { Text("六个页面") }
+                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex + 1) }, enabled = !calibration.isSampling && !recordingActive && calibration.pageIndex < fingerprintPages.lastIndex) { Text("下一页") }
                     }
-                if (wideLayout) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                        Overview(state, Modifier.weight(1f))
-                        Controls(
-                            state = state,
-                            modifier = Modifier.weight(1f),
-                            viewModel = viewModel,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                            onRequestCapture = onRequestCapture,
-                            onShowDiagnostics = { showDiagnostics = true },
-                            onShowVision = { showVision = true },
-                            onShowCalibration = { showCalibration = true },
-                        )
+                    Row {
+                        TextButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }, enabled = !calibration.isSampling && !recordingActive) { Text("无此界面") }
+                        TextButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }, enabled = !calibration.isSampling && !recordingActive) { Text("瞬时界面") }
                     }
-                } else {
-                    Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                    ) {
-                        Overview(state, Modifier.fillMaxWidth())
-                        Controls(
-                            state = state,
-                            modifier = Modifier.fillMaxWidth(),
-                            viewModel = viewModel,
-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                            onRequestCapture = onRequestCapture,
-                            onShowDiagnostics = { showDiagnostics = true },
-                            onShowVision = { showVision = true },
-                            onShowCalibration = { showCalibration = true },
-                        )
+                    Text("实时识别：${calibration.recognizedPage?.let { id -> fingerprintPages.find { it.pageId == id }?.displayNameZh } ?: "未知页面"}")
+                    calibration.scores.toList().sortedByDescending { it.second }.forEach { (id, score) ->
+                        Text("${fingerprintPages.find { it.pageId == id }?.displayNameZh ?: id} / $id：${"%.1f%%".format(score * 100)}")
                     }
-                }
+                    if (wideLayout) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                            Overview(state, Modifier.weight(1f))
+                            Controls(
+                                state = state,
+                                modifier = Modifier.weight(1f),
+                                viewModel = viewModel,
+                                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                                onRequestCapture = onRequestCapture,
+                                onShowDiagnostics = { showDiagnostics = true },
+                                onShowVision = { showVision = true },
+                            )
+                        }
+                    } else {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            Overview(state, Modifier.fillMaxWidth())
+                            Controls(
+                                state = state,
+                                modifier = Modifier.fillMaxWidth(),
+                                viewModel = viewModel,
+                                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                                onRequestCapture = onRequestCapture,
+                                onShowDiagnostics = { showDiagnostics = true },
+                                onShowVision = { showVision = true },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -126,7 +128,7 @@ fun AssistantApp(
                     val label = when (calibration.unavailablePages[page.pageId]) {
                         "NOT_PRESENT" -> "无此界面"
                         "TRANSIENT" -> "瞬时界面"
-                        else -> if ((recordedPages[page.pageId] ?: 0) > 0) "已采集，待检查" else "待采集"
+                        else -> if (page.pageId in calibration.savedPages) "已有色点指纹，待切换验证" else "待标定"
                     }
                     TextButton(onClick = { viewModel.selectFingerprintPage(index); showPageList = false }) {
                         Text("${index + 1}. ${page.displayNameZh} · $label")
@@ -141,6 +143,13 @@ fun AssistantApp(
             title = { Text("最近诊断事件") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    TextButton(onClick = { showRecordingDebug = !showRecordingDebug }) { Text("开发调试：展开截图录制") }
+                    if (showRecordingDebug) {
+                        Text("仅用于排查，每秒一张 PNG、共 30 秒，不生成指纹。")
+                        Text(recordingStatus)
+                        Button(onClick = viewModel::startCalibrationRecording, enabled = !recordingActive && !calibration.isSampling) { Text("开始调试录制") }
+                        OutlinedButton(onClick = viewModel::stopCalibrationRecording, enabled = recordingActive) { Text("停止录制") }
+                    }
                     if (state.recentEvents.isEmpty()) Text("暂无事件")
                     state.recentEvents.forEach { event ->
                         Text("${event.eventType} · ${event.state} · ${event.result}${event.errorCode?.let { " · $it" }.orEmpty()}")
@@ -176,39 +185,7 @@ fun AssistantApp(
             },
         )
     }
-    if (showCalibration) {
-        val page = fingerprintPages[calibration.pageIndex]
-        AlertDialog(
-            onDismissRequest = { showCalibration = false },
-            confirmButton = { TextButton(onClick = { showCalibration = false }) { Text("关闭") } },
-            title = { Text("页面指纹标定") },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("当前请求：${page.displayNameZh}（${page.pageId}）")
-                    Text(page.descriptionZh)
-                    Text(page.enterHintZh)
-                    Text("状态：${calibration.status} · 帧数：${calibration.frameCount}/30")
-                    Text("候选稳定点：${calibration.candidateCount} · 最终指纹点：${calibration.pointCount}")
-                    Text("自身稳定命中率：${calibration.selfMatchRate?.let { "%.0f%%".format(it * 100) } ?: "待采样"}")
-                    Button(onClick = viewModel::sampleFingerprintPage, modifier = Modifier.fillMaxWidth()) { Text("已打开，开始采样当前页面") }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }) { Text("无此界面") }
-                        OutlinedButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }) { Text("瞬时界面") }
-                    }
-                    Text("已保存：${calibration.savedPages.joinToString().ifEmpty { "无" }}")
-                    Text("无此界面／瞬时界面：${calibration.unavailablePages.entries.joinToString { "${it.key}=${it.value}" }.ifEmpty { "无" }}")
-                    Text("实时识别：${calibration.recognizedPage?.let { id -> fingerprintPages.find { it.pageId == id }?.displayNameZh } ?: "未知页面"}")
-                    calibration.scores.toList().sortedByDescending { it.second }.forEach { (id, score) ->
-                        Text("${fingerprintPages.find { it.pageId == id }?.displayNameZh ?: id}：${"%.0f%%".format(score * 100)}")
-                    }
-                    Text("选择待采样页面：")
-                    fingerprintPages.forEachIndexed { index, candidate ->
-                        TextButton(onClick = { viewModel.selectFingerprintPage(index) }) { Text(candidate.displayNameZh) }
-                    }
-                }
-            },
-        )
-    }
+
 }
 
 @Composable
@@ -246,7 +223,6 @@ private fun Controls(
     onRequestCapture: () -> Unit,
     onShowDiagnostics: () -> Unit,
     onShowVision: () -> Unit,
-    onShowCalibration: () -> Unit,
 ) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -288,7 +264,6 @@ private fun Controls(
             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
             TextButton(onClick = onShowVision, modifier = Modifier.fillMaxWidth()) { Text("Vision Debug（只读）") }
-            TextButton(onClick = onShowCalibration, modifier = Modifier.fillMaxWidth()) { Text("页面指纹标定") }
         }
     }
 }

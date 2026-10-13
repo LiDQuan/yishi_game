@@ -16,16 +16,13 @@ val fingerprintPages = listOf(
     FingerprintPage("DUNGEON_LIST", "地下城列表界面", "列出可选地下城的页面", "请从区域地图点击“地下城”"),
     FingerprintPage("DUNGEON_DETAIL", "地下城详情界面", "显示免费次数和“前往”按钮的页面", "请在地下城列表中打开一个副本详情"),
     FingerprintPage("BATTLE", "副本战斗界面", "进入地下城副本后的战斗画面；与主页的地图小怪区分", "仅在你自行进入免费副本后采集，不要为采样购买次数"),
-    FingerprintPage("NETWORK_DISCONNECTED", "服务器断开连接提示界面", "显示服务器断线或网络错误提示的弹窗", "请在该提示自然出现时停留"),
-    FingerprintPage("BAG_FULL", "背包已满提示界面", "显示背包已满和自动出售按钮的提示", "请在该提示自然出现时停留"),
-    FingerprintPage("CHARACTER_SELECT", "角色选择界面", "显示可选择角色的页面", "请从游戏入口进入角色选择"),
-    FingerprintPage("SETTINGS", "设置界面", "显示游戏设置选项的页面", "请从游戏主页打开设置"),
 )
 
 data class FingerprintPoint(val x: Int, val y: Int, val r: Int, val g: Int, val b: Int, val tolerance: Int = 12)
 data class PixelFingerprint(
     val pageId: String, val displayNameZh: String, val referenceWidth: Int, val referenceHeight: Int,
     val viewportProfileId: String, val requiredMatchRate: Double, val points: List<FingerprintPoint>,
+    val candidateMedians: List<FingerprintPoint> = emptyList(),
 )
 data class FingerprintSample(val candidateCount: Int, val fingerprint: PixelFingerprint, val selfMatchRate: Double)
 data class PixelCandidateFrame(val frameId: Long, val colors: List<IntArray>)
@@ -39,24 +36,26 @@ object PixelFingerprintSampler {
 
     fun sample(page: FingerprintPage, frames: List<PixelCandidateFrame>, viewport: WindowBounds,
                profileId: String, others: List<PixelFingerprint>): FingerprintSample? {
-        if (frames.size < 25 || !viewport.isValid || frames.any { it.colors.size != 192 }) return null
+        if (frames.size < 30 || frames.map { it.frameId }.distinct().size != frames.size || !viewport.isValid || frames.any { it.colors.size != 192 }) return null
         val candidates = mutableListOf<Pair<FingerprintPoint, Double>>()
+        val medians = mutableListOf<FingerprintPoint>()
+        val otherColors = others.filter { it.referenceWidth == viewport.width && it.referenceHeight == viewport.height && it.viewportProfileId == profileId }
+            .map { other -> other.candidateMedians.associateBy { it.x to it.y } }
         for ((index, location) in candidateCoordinates(viewport).withIndex()) {
             val (x, y) = location
             val colors = frames.map { it.colors[index] }
             val median = IntArray(3) { c -> colors.map { it[c] }.sorted()[colors.size / 2] }
             val maxDelta = colors.maxOf { color -> (0..2).maxOf { c -> abs(color[c] - median[c]) } }
-            if (maxDelta > 12) continue
             val point = FingerprintPoint(x, y, median[0], median[1], median[2])
-            val distinct = others.filter { it.referenceWidth == viewport.width && it.referenceHeight == viewport.height && it.viewportProfileId == profileId }
-                .mapNotNull { other -> other.points.minByOrNull { abs(it.x - x) + abs(it.y - y) } }
+            medians += point
+            if (maxDelta > point.tolerance) continue
+            val distinct = otherColors.mapNotNull { it[x to y] }
                 .minOfOrNull { other -> (abs(other.r - point.r) + abs(other.g - point.g) + abs(other.b - point.b)).toDouble() / 3 } ?: 128.0
             candidates += point to (distinct - maxDelta)
         }
         val points = candidates.groupBy { (point, _) -> point.x * 5 / viewport.width to point.y * 4 / viewport.height }
             .values.map { cell -> cell.maxBy { it.second }.first }
-        if (points.size < 20) return null
-        val fingerprint = PixelFingerprint(page.pageId, page.displayNameZh, viewport.width, viewport.height, profileId, 0.85, points.take(30))
+        val fingerprint = PixelFingerprint(page.pageId, page.displayNameZh, viewport.width, viewport.height, profileId, 0.85, points.take(30), medians)
         val self = frames.map { scoreCandidate(it, viewport, fingerprint) }.average()
         return FingerprintSample(candidates.size, fingerprint, self)
     }
@@ -84,6 +83,11 @@ object PixelFingerprintSampler {
         }.toDouble() / fingerprint.points.size
     }
 
+    fun recognizedPage(fingerprints: List<PixelFingerprint>, scores: Map<String, Double>): String? {
+        val best = fingerprints.filter { it.pageId in scores }.maxByOrNull { scores.getValue(it.pageId) } ?: return null
+        return best.pageId.takeIf { scores.getValue(it) >= best.requiredMatchRate }
+    }
+
     private fun fits(frame: ScreenFrameSnapshot, viewport: WindowBounds) =
         viewport.left >= 0 && viewport.top >= 0 && viewport.right <= frame.width && viewport.bottom <= frame.height
 
@@ -100,17 +104,27 @@ class PixelFingerprintStore(private val directory: File) {
         val json = JSONObject().put("pageId", value.pageId).put("displayNameZh", value.displayNameZh)
             .put("referenceWidth", value.referenceWidth).put("referenceHeight", value.referenceHeight)
             .put("viewportProfileId", value.viewportProfileId).put("requiredMatchRate", value.requiredMatchRate)
-            .put("points", JSONArray().apply { value.points.forEach { p -> put(JSONObject().put("x", p.x).put("y", p.y).put("r", p.r).put("g", p.g).put("b", p.b).put("tolerance", p.tolerance)) } })
-        File(directory, "${value.pageId}.json").writeText(json.toString())
+            .put("points", encodePoints(value.points))
+            .put("candidateMedians", encodePoints(value.candidateMedians))
+        val temporary = File(directory, "${value.pageId}.tmp")
+        temporary.writeText(json.toString())
+        check(temporary.renameTo(File(directory, "${value.pageId}.json")))
     }
 
     fun loadAll(): List<PixelFingerprint> = directory.listFiles { file -> file.extension == "json" }.orEmpty().mapNotNull { file ->
         runCatching {
             val json = JSONObject(file.readText())
-            val points = json.getJSONArray("points")
             PixelFingerprint(json.getString("pageId"), json.getString("displayNameZh"), json.getInt("referenceWidth"),
                 json.getInt("referenceHeight"), json.getString("viewportProfileId"), json.getDouble("requiredMatchRate"),
-                (0 until points.length()).map { i -> points.getJSONObject(i).let { FingerprintPoint(it.getInt("x"), it.getInt("y"), it.getInt("r"), it.getInt("g"), it.getInt("b"), it.getInt("tolerance")) } })
+                decodePoints(json.getJSONArray("points")), decodePoints(json.optJSONArray("candidateMedians") ?: JSONArray()))
         }.getOrNull()
+    }
+
+    private fun encodePoints(points: List<FingerprintPoint>) = JSONArray().apply {
+        points.forEach { p -> put(JSONObject().put("x", p.x).put("y", p.y).put("r", p.r).put("g", p.g).put("b", p.b).put("tolerance", p.tolerance)) }
+    }
+
+    private fun decodePoints(points: JSONArray) = (0 until points.length()).map { i ->
+        points.getJSONObject(i).let { FingerprintPoint(it.getInt("x"), it.getInt("y"), it.getInt("r"), it.getInt("g"), it.getInt("b"), it.getInt("tolerance")) }
     }
 }

@@ -1,3 +1,11 @@
+# 2026-10-13 最新断点：REQ-0007 Review 定向整改，待六页真机标定
+
+当前分支仍为 `feat/req-0006-single-dungeon-loop`。本轮统一正式按钮至 2–5 秒内 30 个真实新帧的色点标定；PNG 录制降为诊断里的折叠调试工具。候选 192 点中值私有保存，跨页面以同坐标比较；实时识别遵守每页 requiredMatchRate。清单只保留六个核心页面，BAG_FULL 静态页为 NOT_PRESENT；HOME 包含地图小怪，BATTLE 仅指副本。
+
+构建与 59 项 JVM 测试通过；设备测试 APK 可编译，但 connected 测试因 No connected devices 失败。ADB 未连接，尚未安装本轮整改版，也没有新增真实指纹、Phase C 数据或 SUCCESS。详见 `codex/reports/IMPLEMENT-0007.md`。原 PNG 资料保留且未上传。下一步重新连接 Pad 后先请求【游戏主页】，一次一个地完成六页标定与切换验证。
+
+---
+
 # 2026-10-02 最新断点：REQ-0007 首轮截图已收集，等待 Review
 
 实现截至 `dd9e70d`，分支仍为 `feat/req-0006-single-dungeon-loop`。已安装中文逐页引导采集器，10 类完整截图各 30 张，共 300 张；截图收集不等于色点指纹验证通过。

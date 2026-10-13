@@ -1,144 +1,671 @@
+diff --git a/app/src/androidTest/java/com/lidquan/yishigame/vision/PixelFingerprintStoreTest.kt b/app/src/androidTest/java/com/lidquan/yishigame/vision/PixelFingerprintStoreTest.kt
+new file mode 100644
+index 0000000..b9ebf83
+--- /dev/null
++++ b/app/src/androidTest/java/com/lidquan/yishigame/vision/PixelFingerprintStoreTest.kt
+@@ -0,0 +1,26 @@
++package com.lidquan.yishigame.vision
++
++import android.content.Context
++import androidx.test.core.app.ApplicationProvider
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import java.io.File
++import org.junit.Assert.assertEquals
++import org.junit.Test
++import org.junit.runner.RunWith
++
++@RunWith(AndroidJUnit4::class)
++class PixelFingerprintStoreTest {
++    @Test fun preservesCandidateMediansAndPageThreshold() {
++        val context = ApplicationProvider.getApplicationContext<Context>()
++        val directory = File.createTempFile("fingerprint-test", "", context.cacheDir).apply { delete(); mkdirs() }
++        try {
++            val medians = (0 until 192).map { FingerprintPoint(it % 12, it / 12, it, 30, 50) }
++            val fingerprint = PixelFingerprint("HOME", "游戏主页", 12, 16, "test", 0.91, medians.take(20), medians)
++            val store = PixelFingerprintStore(directory)
++            store.save(fingerprint)
++            assertEquals(fingerprint, store.loadAll().single())
++        } finally {
++            directory.deleteRecursively()
++        }
++    }
++}
 diff --git a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-index 9adfb07..dc9085c 100644
+index cf7ffaf..908985a 100644
 --- a/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
 +++ b/app/src/main/java/com/lidquan/yishigame/MainViewModel.kt
-@@ -576,6 +576,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-                 "freeTotal" to snapshot.visionMetrics.freeAttempts?.total,
-                 "viewportVersion" to snapshot.visionMetrics.stablePage?.viewportVersion,
-                 "pageDetection" to snapshot.visionMetrics.pageDetection.javaClass.simpleName,
-+                "visionConfidence" to snapshot.visionMetrics.stablePage?.confidence,
-+                "visionCandidates" to diagnosticCandidates(snapshot.visionMetrics),
-+                "ocr" to diagnosticOcr(snapshot.visionMetrics),
-                 "progressCurrent" to progress?.current,
-                 "progressTotal" to progress?.total,
-                 "autoBattleState" to snapshot.visionMetrics.autoBattleState.name,
-@@ -766,9 +769,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         while (System.nanoTime() / 1_000_000L < deadline) {
-             val state = mutableUiState.value
-             val page = state.visionMetrics.stablePage
-+            val blockers = buildList {
-+                if (page == null || page.pageId !in expected) add("EXPECTED_PAGE_NOT_STABLE")
-+                if (page != null && page.observedAt < afterTap) add("PAGE_PREDATES_TAP")
-+                if (page != null && page.viewportVersion != windowMonitor.version) add("VIEWPORT_VERSION_CHANGED")
-+                if (state.windowGate != WindowGate.MATCHED || !state.targetActive) add("WINDOW_NOT_ACTIVE_OR_MATCHED")
-+                if (intent == ActionType.SELECT_AREA && state.visionMetrics.currentMap != req0006TargetArea) add("TARGET_MAP_UNCONFIRMED")
-+            }
-             val evidence = mapOf("actionId" to actionId, "stablePage" to page?.pageId,
-                 "currentMap" to state.visionMetrics.currentMap, "viewportVersion" to windowMonitor.version,
-                 "pageDetection" to state.visionMetrics.pageDetection.javaClass.simpleName,
-+                "visionConfidence" to page?.confidence,
-+                "visionCandidates" to diagnosticCandidates(state.visionMetrics),
-+                "pageObservedAt" to page?.observedAt,
-+                "ocr" to diagnosticOcr(state.visionMetrics),
-+                "postconditionBlockers" to blockers,
-                 "evidenceIds" to state.visionMetrics.evidenceIds.joinToString())
-             if (evidence != lastEvidence) {
-                 logger.event("POSTCONDITION_OBSERVATION", req0006State, state.automationState.name, values = evidence)
-@@ -784,6 +799,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
-         return null
+@@ -68,6 +68,10 @@ data class FingerprintCalibrationState(
+     val candidateCount: Int = 0,
+     val pointCount: Int = 0,
+     val selfMatchRate: Double? = null,
++    val highestOtherScore: Double? = null,
++    val scoreMargin: Double? = null,
++    val otherPageCount: Int = 0,
++    val isSampling: Boolean = false,
+     val scores: Map<String, Double> = emptyMap(),
+     val recognizedPage: String? = null,
+     val savedPages: List<String> = emptyList(),
+@@ -136,9 +140,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     val uiState: StateFlow<EnvironmentUiState> = mutableUiState.asStateFlow()
+     private val fingerprintStore = PixelFingerprintStore(appContext.filesDir.resolve("pixel-fingerprints"))
+     private val mutableCalibration = MutableStateFlow(FingerprintCalibrationState(
+-        pageIndex = preferences.getInt("recording-page-index", 0).coerceIn(fingerprintPages.indices),
+-        savedPages = fingerprintStore.loadAll().map { it.pageId },
+-        unavailablePages = fingerprintPages.mapNotNull { page -> preferences.getString("fingerprint-status-${page.pageId}", null)?.let { page.pageId to it } }.toMap(),
++        pageIndex = preferences.getInt("fingerprint-page-index", 0).coerceIn(fingerprintPages.indices),
++        savedPages = loadCoreFingerprints().map { it.pageId },
++        unavailablePages = mapOf("BAG_FULL" to "NOT_PRESENT") + fingerprintPages.mapNotNull { page -> preferences.getString("fingerprint-status-${page.pageId}", null)?.let { page.pageId to it } }.toMap(),
+     ))
+     val calibration: StateFlow<FingerprintCalibrationState> = mutableCalibration.asStateFlow()
+     private var samplingJob: Job? = null
+@@ -147,11 +151,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     val recordingStatus: StateFlow<String> = mutableRecordingStatus.asStateFlow()
+     private val mutableRecordingActive = MutableStateFlow(false)
+     val recordingActive: StateFlow<Boolean> = mutableRecordingActive.asStateFlow()
+-    private val mutableRecordedPages = MutableStateFlow(fingerprintPages.associate { it.pageId to preferences.getInt("recorded-${it.pageId}", 0) })
+-    val recordedPages: StateFlow<Map<String, Int>> = mutableRecordedPages.asStateFlow()
+ 
+     fun startCalibrationRecording() {
+-        if (recordingJob?.isActive == true) return
++        if (recordingJob?.isActive == true || samplingJob?.isActive == true) return
+         if (captureController.state.value !is ScreenCaptureState.Active) {
+             mutableRecordingStatus.value = "请先点击屏幕采集授权，选择整个屏幕，再开始采集"
+             return
+@@ -193,7 +195,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                 }
+                 if (saved > 0) {
+                     preferences.edit().putInt("recorded-${requestedPage.pageId}", saved).remove("fingerprint-status-${requestedPage.pageId}").apply()
+-                    mutableRecordedPages.value = mutableRecordedPages.value + (requestedPage.pageId to saved)
+                     mutableCalibration.value = mutableCalibration.value.copy(unavailablePages = mutableCalibration.value.unavailablePages - requestedPage.pageId)
+                 }
+                 mutableRecordingStatus.value = "【${requestedPage.displayNameZh}】已保存 ${saved} 张，待检查。可点“下一页”查看下一项提示。"
+@@ -211,6 +212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     fun stopCalibrationRecording() { recordingJob?.cancel() }
+ 
+     init {
++        preferences.edit().putString("fingerprint-status-BAG_FULL", "NOT_PRESENT").apply()
+         RunLogger.finalizeOrphanedSessions(appContext)
+         viewModelScope.launch { stateMachine.state.collect { refresh() } }
+         viewModelScope.launch { captureController.state.collect { refresh() } }
+@@ -225,16 +227,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             while (true) {
+                 delay(500)
+                 val geometry = confirmedGeometry(mutableUiState.value.windowBounds)
+-                val fingerprints = fingerprintStore.loadAll()
+-                if (geometry == null || mutableUiState.value.windowGate != WindowGate.MATCHED || fingerprints.isEmpty()) {
++                val fingerprints = loadCoreFingerprints()
++                if (geometry == null || captureController.state.value !is ScreenCaptureState.Active || mutableUiState.value.windowGate != WindowGate.MATCHED || fingerprints.isEmpty()) {
+                     mutableCalibration.value = mutableCalibration.value.copy(scores = emptyMap(), recognizedPage = null)
+                     continue
+                 }
+                 val frame = captureController.frameStore.latestSnapshot() ?: continue
+                 val profile = fingerprintProfileId(geometry.windowBounds, geometry.contentViewport)
+-                val scores = fingerprints.filter { it.viewportProfileId == profile }.associate { it.pageId to (PixelFingerprintSampler.score(frame, geometry.contentViewport, it) ?: 0.0) }
+-                val best = scores.maxByOrNull { it.value }
+-                mutableCalibration.value = mutableCalibration.value.copy(scores = scores, recognizedPage = best?.key?.takeIf { best.value >= 0.85 })
++                val matching = fingerprints.filter { it.viewportProfileId == profile }
++                val scores = matching.associate { it.pageId to (PixelFingerprintSampler.score(frame, geometry.contentViewport, it) ?: 0.0) }
++                mutableCalibration.value = mutableCalibration.value.copy(scores = scores, recognizedPage = PixelFingerprintSampler.recognizedPage(matching, scores))
+             }
+         }
+     }
+@@ -242,8 +244,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     fun selectFingerprintPage(index: Int) {
+         if (samplingJob?.isActive == true || recordingJob?.isActive == true || index !in fingerprintPages.indices) return
+         mutableRecordingStatus.value = "请按提示打开页面，再点击采集"
+-        preferences.edit().putInt("recording-page-index", index).apply()
+-        mutableCalibration.value = mutableCalibration.value.copy(pageIndex = index, status = "等待打开页面", frameCount = 0, candidateCount = 0, pointCount = 0, selfMatchRate = null)
++        preferences.edit().putInt("fingerprint-page-index", index).apply()
++        mutableCalibration.value = mutableCalibration.value.copy(pageIndex = index, status = "等待打开页面", frameCount = 0, candidateCount = 0, pointCount = 0, selfMatchRate = null, highestOtherScore = null, scoreMargin = null, otherPageCount = 0)
      }
  
-+    private fun diagnosticOcr(metrics: VisionMetrics): List<Map<String, Any?>> = metrics.ocrLines.map { line ->
-+        mapOf("text" to line.normalizedText.take(80), "confidence" to line.reportedConfidence,
-+            "rect" to line.rect.toString())
+     fun markFingerprintPage(status: String) {
+@@ -255,61 +257,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     }
+ 
+     fun sampleFingerprintPage() {
+-        if (samplingJob?.isActive == true) return
++        if (samplingJob?.isActive == true || recordingJob?.isActive == true) return
+         samplingJob = viewModelScope.launch {
+-            val page = fingerprintPages[mutableCalibration.value.pageIndex]
+-            val window = mutableUiState.value.windowBounds
+-            val geometry = confirmedGeometry(window)
+-            if (geometry == null || mutableUiState.value.windowGate != WindowGate.MATCHED || captureController.state.value !is ScreenCaptureState.Active) {
+-                mutableCalibration.value = mutableCalibration.value.copy(status = "失败：请恢复标准游戏窗口并开启屏幕采集")
+-                return@launch
+-            }
+-            val profile = fingerprintProfileId(geometry.windowBounds, geometry.contentViewport)
+-            val frames = mutableListOf<com.lidquan.yishigame.vision.PixelCandidateFrame>()
+-            var lastId = 0L
+-            mutableCalibration.value = mutableCalibration.value.copy(status = "采样中", frameCount = 0)
+-            val deadline = System.currentTimeMillis() + 5000
+-            while (frames.size < 30 && System.currentTimeMillis() < deadline) {
+-                if (confirmedGeometry(mutableUiState.value.windowBounds) != geometry || mutableUiState.value.windowGate != WindowGate.MATCHED) {
+-                    mutableCalibration.value = mutableCalibration.value.copy(status = "失败：游戏窗口位置发生变化")
++            mutableCalibration.value = mutableCalibration.value.copy(isSampling = true, status = "采样中", frameCount = 0,
++                candidateCount = 0, pointCount = 0, selfMatchRate = null, highestOtherScore = null, scoreMargin = null)
++            try {
++                val page = fingerprintPages[mutableCalibration.value.pageIndex]
++                val window = mutableUiState.value.windowBounds
++                val geometry = confirmedGeometry(window)
++                if (geometry == null || mutableUiState.value.windowGate != WindowGate.MATCHED || captureController.state.value !is ScreenCaptureState.Active) {
++                    mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 请开启采集和辅助功能，并执行环境检查确认标准窗口")
+                     return@launch
+                 }
+-                val frame = captureController.frameStore.latestSnapshot()
+-                if (frame != null && frame.frameId != lastId) {
+-                    val candidate = PixelFingerprintSampler.candidateFrame(frame, geometry.contentViewport)
+-                    if (candidate == null) {
+-                        mutableCalibration.value = mutableCalibration.value.copy(status = "失败：采集帧与窗口不匹配")
++                val profile = fingerprintProfileId(geometry.windowBounds, geometry.contentViewport)
++                val frames = mutableListOf<com.lidquan.yishigame.vision.PixelCandidateFrame>()
++                var lastId = captureController.frameStore.metadata.value.frameId
++                val deadline = android.os.SystemClock.elapsedRealtime() + 5000
++                while (frames.size < 30 && android.os.SystemClock.elapsedRealtime() < deadline) {
++                    if (captureController.state.value !is ScreenCaptureState.Active || confirmedGeometry(mutableUiState.value.windowBounds) != geometry || mutableUiState.value.windowGate != WindowGate.MATCHED) {
++                        mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 采集停止或游戏窗口位置发生变化")
+                         return@launch
+                     }
+-                    frames += candidate
+-                    lastId = frame.frameId
+-                    mutableCalibration.value = mutableCalibration.value.copy(frameCount = frames.size)
++                    val frame = captureController.frameStore.latestSnapshot()
++                    if (frame != null && frame.frameId != lastId) {
++                        val candidate = PixelFingerprintSampler.candidateFrame(frame, geometry.contentViewport)
++                        if (candidate == null) {
++                            mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 采集帧与窗口不匹配")
++                            return@launch
++                        }
++                        frames += candidate
++                        lastId = frame.frameId
++                        mutableCalibration.value = mutableCalibration.value.copy(frameCount = frames.size)
++                    }
++                    delay(80)
+                 }
+-                delay(80)
+-            }
+-            val others = fingerprintStore.loadAll().filter { it.pageId != page.pageId }
+-            val result = withContext(Dispatchers.Default) { PixelFingerprintSampler.sample(page, frames, geometry.contentViewport, profile, others) }
+-            if (result == null || result.selfMatchRate < 0.85) {
+-                mutableCalibration.value = mutableCalibration.value.copy(status = "需要重新采样：稳定点或帧数不足", candidateCount = result?.candidateCount ?: 0,
+-                    pointCount = result?.fingerprint?.points?.size ?: 0, selfMatchRate = result?.selfMatchRate)
+-                return@launch
+-            }
+-            val competing = others.filter { it.viewportProfileId == profile }.maxOfOrNull { other ->
+-                frames.map { PixelFingerprintSampler.scoreCandidate(it, geometry.contentViewport, other) }.average()
+-            } ?: 0.0
+-            if (competing >= result.selfMatchRate - 0.15) {
+-                mutableCalibration.value = mutableCalibration.value.copy(status = "需要重新采样：与已有页面区分不足", candidateCount = result.candidateCount,
+-                    pointCount = result.fingerprint.points.size, selfMatchRate = result.selfMatchRate)
+-                return@launch
++                val others = loadCoreFingerprints().filter { it.pageId != page.pageId && it.viewportProfileId == profile }
++                val result = withContext(Dispatchers.Default) { PixelFingerprintSampler.sample(page, frames, geometry.contentViewport, profile, others) }
++                if (result == null || result.fingerprint.points.size < 20 || result.selfMatchRate < result.fingerprint.requiredMatchRate) {
++                    mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 稳定点或真实帧数不足", candidateCount = result?.candidateCount ?: 0,
++                        pointCount = result?.fingerprint?.points?.size ?: 0, selfMatchRate = result?.selfMatchRate)
++                    return@launch
++                }
++                val otherScores = others.associate { other -> other.pageId to frames.map { PixelFingerprintSampler.scoreCandidate(it, geometry.contentViewport, other) }.average() }
++                val competing = otherScores.values.maxOrNull() ?: 0.0
++                mutableCalibration.value = mutableCalibration.value.copy(candidateCount = result.candidateCount, pointCount = result.fingerprint.points.size,
++                    selfMatchRate = result.selfMatchRate, highestOtherScore = competing, scoreMargin = result.selfMatchRate - competing, otherPageCount = others.size)
++                if (competing >= result.selfMatchRate - 0.15) {
++                    mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 与已有页面区分不足", candidateCount = result.candidateCount,
++                        pointCount = result.fingerprint.points.size, selfMatchRate = result.selfMatchRate)
++                    return@launch
++                }
++                if (captureController.state.value !is ScreenCaptureState.Active || confirmedGeometry(mutableUiState.value.windowBounds) != geometry) {
++                    mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 分析期间采集或窗口发生变化")
++                    return@launch
++                }
++                withContext(Dispatchers.IO) {
++                    fingerprintStore.save(result.fingerprint)
++                    val directory = appContext.filesDir.resolve("fingerprint-calibration-results").apply { mkdirs() }
++                    directory.resolve("${page.pageId}.json").writeText(org.json.JSONObject()
++                        .put("pageId", page.pageId).put("displayNameZh", page.displayNameZh).put("sampleFrameCount", frames.size)
++                        .put("stableCandidateCount", result.candidateCount).put("pointCount", result.fingerprint.points.size)
++                        .put("selfMatchRate", result.selfMatchRate).put("highestOtherScore", competing)
++                        .put("scoreMargin", result.selfMatchRate - competing).put("otherPageCount", others.size)
++                        .put("status", "PASS").toString())
++                }
++                preferences.edit().remove("fingerprint-status-${page.pageId}").apply()
++                val scores = otherScores + (page.pageId to result.selfMatchRate)
++                mutableCalibration.value = mutableCalibration.value.copy(status = "PASS · 本页标定通过，仍需六页切换验证", candidateCount = result.candidateCount,
++                    pointCount = result.fingerprint.points.size, selfMatchRate = result.selfMatchRate,
++                    scores = scores, recognizedPage = page.pageId,
++                    savedPages = loadCoreFingerprints().map { it.pageId }, unavailablePages = mutableCalibration.value.unavailablePages - page.pageId)
++            } catch (cancelled: CancellationException) {
++                mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 采样已停止")
++                throw cancelled
++            } catch (_: Exception) {
++                mutableCalibration.value = mutableCalibration.value.copy(status = "NEED_RESAMPLE · 采样或保存失败，请检查采集状态和存储空间")
++            } finally {
++                mutableCalibration.value = mutableCalibration.value.copy(isSampling = false)
+             }
+-            fingerprintStore.save(result.fingerprint)
+-            preferences.edit().remove("fingerprint-status-${page.pageId}").apply()
+-            mutableCalibration.value = mutableCalibration.value.copy(status = "通过", candidateCount = result.candidateCount,
+-                pointCount = result.fingerprint.points.size, selfMatchRate = result.selfMatchRate,
+-                savedPages = fingerprintStore.loadAll().map { it.pageId }, unavailablePages = mutableCalibration.value.unavailablePages - page.pageId)
+         }
+     }
+ 
++    fun stopFingerprintSampling() { samplingJob?.cancel() }
++
++    private fun loadCoreFingerprints() = fingerprintStore.loadAll().filter {
++        it.pageId in fingerprintPages.map { page -> page.pageId } && it.candidateMedians.size == 192
 +    }
 +
-+    private fun diagnosticCandidates(metrics: VisionMetrics): Map<String, Float> = when (val detection = metrics.pageDetection) {
-+        is com.lidquan.yishigame.vision.PageDetection.Matched -> mapOf(detection.pageId to detection.confidence)
-+        is com.lidquan.yishigame.vision.PageDetection.Ambiguous -> detection.candidates.associate { it.pageId to it.confidence }
-+        is com.lidquan.yishigame.vision.PageDetection.Unknown -> emptyMap()
-+    }
-+
-     private suspend fun executeLoggedAction(logger: RunLogger, executor: ActionExecutor, intent: ActionIntent,
-         state: EnvironmentUiState, retryIndex: Int, actionId: String): ActionExecution {
-         val policy = com.lidquan.yishigame.action.ActionPolicyRegistry.policy(intent.type)
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-index 837622f..cbc87f7 100644
---- a/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/ConfiguredVisionEngine.kt
-@@ -155,6 +155,7 @@ class ConfiguredVisionEngine(
-             currentMap = currentMap,
-             currentDungeon = currentDungeon,
-             evidenceIds = evidence.map { it.id },
-+            ocrLines = allOcrLines.take(24),
+     private fun fingerprintProfileId(window: WindowBounds, viewport: WindowBounds): String =
+         "${window.left}_${window.top}_${window.width}_${window.height}_${viewport.left}_${viewport.top}_${viewport.width}_${viewport.height}"
+ 
+diff --git a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+index d926e1e..1b19024 100644
+--- a/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
++++ b/app/src/main/java/com/lidquan/yishigame/ui/AssistantApp.kt
+@@ -46,11 +46,10 @@ fun AssistantApp(
+     val state by viewModel.uiState.collectAsState()
+     var showDiagnostics by remember { mutableStateOf(false) }
+     var showVision by remember { mutableStateOf(false) }
+-    var showCalibration by remember { mutableStateOf(false) }
+     val calibration by viewModel.calibration.collectAsState()
+     val recordingStatus by viewModel.recordingStatus.collectAsState()
+     val recordingActive by viewModel.recordingActive.collectAsState()
+-    val recordedPages by viewModel.recordedPages.collectAsState()
++    var showRecordingDebug by remember { mutableStateOf(false) }
+     var showPageList by remember { mutableStateOf(false) }
+     val requestedPage = fingerprintPages[calibration.pageIndex]
+ 
+@@ -58,61 +57,64 @@ fun AssistantApp(
+         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
+             BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+                 val wideLayout = maxWidth >= 840.dp
+-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Text("逐页采集 · ${calibration.pageIndex + 1}/${fingerprintPages.size}：${requestedPage.displayNameZh}", style = MaterialTheme.typography.titleLarge)
++                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                    Text("页面指纹标定 · ${calibration.pageIndex + 1}/${fingerprintPages.size}：${requestedPage.displayNameZh}", style = MaterialTheme.typography.titleLarge)
++                    Text("内部 ID：${requestedPage.pageId}")
+                     Text(requestedPage.descriptionZh)
+                     Text("如何打开：${requestedPage.enterHintZh}")
+-                    Text("打开后点击采集，倒计时 3 秒后保持此页 30 秒，不要切换。图片仅保存在助手私有目录。")
+-                    Text("本页：" + when (calibration.unavailablePages[requestedPage.pageId]) {
+-                        "NOT_PRESENT" -> "已标记无此界面"
+-                        "TRANSIENT" -> "已标记瞬时界面"
+-                        else -> recordedPages[requestedPage.pageId]?.takeIf { it > 0 }?.let { "已保存 ${it} 张，待检查" } ?: "待采集"
+-                    })
+-                    Text(recordingStatus)
++                    Text("打开后点击采集，保持本页约 2～5 秒；采集 30 个新帧并直接生成指纹。")
++                    Text("状态：${calibration.status} · 真实帧数：${calibration.frameCount}/30")
++                    Text("候选稳定点：${calibration.candidateCount} · 最终点数：${calibration.pointCount}")
++                    Text("自身命中率：${calibration.selfMatchRate?.let { "%.1f%%".format(it * 100) } ?: "待采样"}")
++                    Text("其他页面最高得分：${calibration.highestOtherScore?.let { "%.1f%%".format(it * 100) } ?: "待采样"} · 分差：${calibration.scoreMargin?.let { "%.1f 个百分点".format(it * 100) } ?: "待采样"}")
++                    if (calibration.selfMatchRate != null && calibration.otherPageCount == 0) Text("这是首个页面，跨页面区分需等待其他页面采集后验证。")
+                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                        Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active) { Text("屏幕采集授权") }
+-                        Button(onClick = viewModel::startCalibrationRecording, enabled = !recordingActive) { Text("已打开，采集此页") }
+-                        OutlinedButton(onClick = viewModel::stopCalibrationRecording, enabled = recordingActive) { Text("停止") }
++                        Button(onClick = onRequestCapture, enabled = state.captureState !is ScreenCaptureState.Active && !calibration.isSampling) { Text("屏幕采集授权") }
++                        Button(onClick = viewModel::sampleFingerprintPage, enabled = !calibration.isSampling && !recordingActive) { Text("已打开，开始采集") }
++                        OutlinedButton(onClick = viewModel::stopFingerprintSampling, enabled = calibration.isSampling) { Text("停止") }
+                     }
+                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex - 1) }, enabled = !recordingActive && calibration.pageIndex > 0) { Text("上一页") }
+-                        TextButton(onClick = { showPageList = true }, enabled = !recordingActive) { Text("全部页面") }
+-                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex + 1) }, enabled = !recordingActive && calibration.pageIndex < fingerprintPages.lastIndex) { Text("下一页") }
+-                        TextButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }, enabled = !recordingActive) { Text("无此界面") }
+-                        TextButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }, enabled = !recordingActive) { Text("瞬时界面") }
++                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex - 1) }, enabled = !calibration.isSampling && !recordingActive && calibration.pageIndex > 0) { Text("上一页") }
++                        TextButton(onClick = { showPageList = true }, enabled = !calibration.isSampling && !recordingActive) { Text("六个页面") }
++                        TextButton(onClick = { viewModel.selectFingerprintPage(calibration.pageIndex + 1) }, enabled = !calibration.isSampling && !recordingActive && calibration.pageIndex < fingerprintPages.lastIndex) { Text("下一页") }
+                     }
+-                if (wideLayout) {
+-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+-                        Overview(state, Modifier.weight(1f))
+-                        Controls(
+-                            state = state,
+-                            modifier = Modifier.weight(1f),
+-                            viewModel = viewModel,
+-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+-                            onRequestCapture = onRequestCapture,
+-                            onShowDiagnostics = { showDiagnostics = true },
+-                            onShowVision = { showVision = true },
+-                            onShowCalibration = { showCalibration = true },
+-                        )
++                    Row {
++                        TextButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }, enabled = !calibration.isSampling && !recordingActive) { Text("无此界面") }
++                        TextButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }, enabled = !calibration.isSampling && !recordingActive) { Text("瞬时界面") }
+                     }
+-                } else {
+-                    Column(
+-                        modifier = Modifier.verticalScroll(rememberScrollState()),
+-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+-                    ) {
+-                        Overview(state, Modifier.fillMaxWidth())
+-                        Controls(
+-                            state = state,
+-                            modifier = Modifier.fillMaxWidth(),
+-                            viewModel = viewModel,
+-                            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+-                            onRequestCapture = onRequestCapture,
+-                            onShowDiagnostics = { showDiagnostics = true },
+-                            onShowVision = { showVision = true },
+-                            onShowCalibration = { showCalibration = true },
+-                        )
++                    Text("实时识别：${calibration.recognizedPage?.let { id -> fingerprintPages.find { it.pageId == id }?.displayNameZh } ?: "未知页面"}")
++                    calibration.scores.toList().sortedByDescending { it.second }.forEach { (id, score) ->
++                        Text("${fingerprintPages.find { it.pageId == id }?.displayNameZh ?: id} / $id：${"%.1f%%".format(score * 100)}")
++                    }
++                    if (wideLayout) {
++                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
++                            Overview(state, Modifier.weight(1f))
++                            Controls(
++                                state = state,
++                                modifier = Modifier.weight(1f),
++                                viewModel = viewModel,
++                                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
++                                onRequestCapture = onRequestCapture,
++                                onShowDiagnostics = { showDiagnostics = true },
++                                onShowVision = { showVision = true },
++                            )
++                        }
++                    } else {
++                        Column(
++                            verticalArrangement = Arrangement.spacedBy(16.dp),
++                        ) {
++                            Overview(state, Modifier.fillMaxWidth())
++                            Controls(
++                                state = state,
++                                modifier = Modifier.fillMaxWidth(),
++                                viewModel = viewModel,
++                                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
++                                onRequestCapture = onRequestCapture,
++                                onShowDiagnostics = { showDiagnostics = true },
++                                onShowVision = { showVision = true },
++                            )
++                        }
+                     }
+-                }
+                 }
+             }
+         }
+@@ -126,7 +128,7 @@ fun AssistantApp(
+                     val label = when (calibration.unavailablePages[page.pageId]) {
+                         "NOT_PRESENT" -> "无此界面"
+                         "TRANSIENT" -> "瞬时界面"
+-                        else -> if ((recordedPages[page.pageId] ?: 0) > 0) "已采集，待检查" else "待采集"
++                        else -> if (page.pageId in calibration.savedPages) "已有色点指纹，待切换验证" else "待标定"
+                     }
+                     TextButton(onClick = { viewModel.selectFingerprintPage(index); showPageList = false }) {
+                         Text("${index + 1}. ${page.displayNameZh} · $label")
+@@ -141,6 +143,13 @@ fun AssistantApp(
+             title = { Text("最近诊断事件") },
+             text = {
+                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
++                    TextButton(onClick = { showRecordingDebug = !showRecordingDebug }) { Text("开发调试：展开截图录制") }
++                    if (showRecordingDebug) {
++                        Text("仅用于排查，每秒一张 PNG、共 30 秒，不生成指纹。")
++                        Text(recordingStatus)
++                        Button(onClick = viewModel::startCalibrationRecording, enabled = !recordingActive && !calibration.isSampling) { Text("开始调试录制") }
++                        OutlinedButton(onClick = viewModel::stopCalibrationRecording, enabled = recordingActive) { Text("停止录制") }
++                    }
+                     if (state.recentEvents.isEmpty()) Text("暂无事件")
+                     state.recentEvents.forEach { event ->
+                         Text("${event.eventType} · ${event.state} · ${event.result}${event.errorCode?.let { " · $it" }.orEmpty()}")
+@@ -176,39 +185,7 @@ fun AssistantApp(
+             },
          )
      }
+-    if (showCalibration) {
+-        val page = fingerprintPages[calibration.pageIndex]
+-        AlertDialog(
+-            onDismissRequest = { showCalibration = false },
+-            confirmButton = { TextButton(onClick = { showCalibration = false }) { Text("关闭") } },
+-            title = { Text("页面指纹标定") },
+-            text = {
+-                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Text("当前请求：${page.displayNameZh}（${page.pageId}）")
+-                    Text(page.descriptionZh)
+-                    Text(page.enterHintZh)
+-                    Text("状态：${calibration.status} · 帧数：${calibration.frameCount}/30")
+-                    Text("候选稳定点：${calibration.candidateCount} · 最终指纹点：${calibration.pointCount}")
+-                    Text("自身稳定命中率：${calibration.selfMatchRate?.let { "%.0f%%".format(it * 100) } ?: "待采样"}")
+-                    Button(onClick = viewModel::sampleFingerprintPage, modifier = Modifier.fillMaxWidth()) { Text("已打开，开始采样当前页面") }
+-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                        OutlinedButton(onClick = { viewModel.markFingerprintPage("NOT_PRESENT") }) { Text("无此界面") }
+-                        OutlinedButton(onClick = { viewModel.markFingerprintPage("TRANSIENT") }) { Text("瞬时界面") }
+-                    }
+-                    Text("已保存：${calibration.savedPages.joinToString().ifEmpty { "无" }}")
+-                    Text("无此界面／瞬时界面：${calibration.unavailablePages.entries.joinToString { "${it.key}=${it.value}" }.ifEmpty { "无" }}")
+-                    Text("实时识别：${calibration.recognizedPage?.let { id -> fingerprintPages.find { it.pageId == id }?.displayNameZh } ?: "未知页面"}")
+-                    calibration.scores.toList().sortedByDescending { it.second }.forEach { (id, score) ->
+-                        Text("${fingerprintPages.find { it.pageId == id }?.displayNameZh ?: id}：${"%.0f%%".format(score * 100)}")
+-                    }
+-                    Text("选择待采样页面：")
+-                    fingerprintPages.forEachIndexed { index, candidate ->
+-                        TextButton(onClick = { viewModel.selectFingerprintPage(index) }) { Text(candidate.displayNameZh) }
+-                    }
+-                }
+-            },
+-        )
+-    }
++
+ }
  
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-index 0808fe9..724550d 100644
---- a/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionModels.kt
-@@ -68,4 +68,5 @@ data class VisionMetrics(
-     val currentMap: String? = null,
-     val currentDungeon: String? = null,
-     val evidenceIds: List<String> = emptyList(),
-+    val ocrLines: List<OcrEvidence> = emptyList(),
- )
-diff --git a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-index 6b76d2d..3c91517 100644
---- a/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-+++ b/app/src/main/java/com/lidquan/yishigame/vision/VisionWorker.kt
-@@ -29,6 +29,7 @@ data class VisionAnalysis(
-     val currentMap: String? = null,
-     val currentDungeon: String? = null,
-     val evidenceIds: List<String> = emptyList(),
-+    val ocrLines: List<OcrEvidence> = emptyList(),
+ @Composable
+@@ -246,7 +223,6 @@ private fun Controls(
+     onRequestCapture: () -> Unit,
+     onShowDiagnostics: () -> Unit,
+     onShowVision: () -> Unit,
+-    onShowCalibration: () -> Unit,
+ ) {
+     Card(modifier = modifier) {
+         Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+@@ -288,7 +264,6 @@ private fun Controls(
+             OutlinedButton(onClick = viewModel::stop, modifier = Modifier.fillMaxWidth()) { Text("停止") }
+             TextButton(onClick = onShowDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("查看诊断") }
+             TextButton(onClick = onShowVision, modifier = Modifier.fillMaxWidth()) { Text("Vision Debug（只读）") }
+-            TextButton(onClick = onShowCalibration, modifier = Modifier.fillMaxWidth()) { Text("页面指纹标定") }
+         }
+     }
+ }
+diff --git a/app/src/main/java/com/lidquan/yishigame/vision/PixelFingerprintSampler.kt b/app/src/main/java/com/lidquan/yishigame/vision/PixelFingerprintSampler.kt
+index 010bfdf..3a5bfa0 100644
+--- a/app/src/main/java/com/lidquan/yishigame/vision/PixelFingerprintSampler.kt
++++ b/app/src/main/java/com/lidquan/yishigame/vision/PixelFingerprintSampler.kt
+@@ -16,16 +16,13 @@ val fingerprintPages = listOf(
+     FingerprintPage("DUNGEON_LIST", "地下城列表界面", "列出可选地下城的页面", "请从区域地图点击“地下城”"),
+     FingerprintPage("DUNGEON_DETAIL", "地下城详情界面", "显示免费次数和“前往”按钮的页面", "请在地下城列表中打开一个副本详情"),
+     FingerprintPage("BATTLE", "副本战斗界面", "进入地下城副本后的战斗画面；与主页的地图小怪区分", "仅在你自行进入免费副本后采集，不要为采样购买次数"),
+-    FingerprintPage("NETWORK_DISCONNECTED", "服务器断开连接提示界面", "显示服务器断线或网络错误提示的弹窗", "请在该提示自然出现时停留"),
+-    FingerprintPage("BAG_FULL", "背包已满提示界面", "显示背包已满和自动出售按钮的提示", "请在该提示自然出现时停留"),
+-    FingerprintPage("CHARACTER_SELECT", "角色选择界面", "显示可选择角色的页面", "请从游戏入口进入角色选择"),
+-    FingerprintPage("SETTINGS", "设置界面", "显示游戏设置选项的页面", "请从游戏主页打开设置"),
  )
  
- class VisionWorker(
-@@ -87,6 +88,7 @@ class VisionWorker(
-                         currentMap = result.currentMap,
-                         currentDungeon = result.currentDungeon,
-                         evidenceIds = result.evidenceIds,
-+                        ocrLines = result.ocrLines,
-                     )
-                     lastFrameId = frame.frameId
-                 }
+ data class FingerprintPoint(val x: Int, val y: Int, val r: Int, val g: Int, val b: Int, val tolerance: Int = 12)
+ data class PixelFingerprint(
+     val pageId: String, val displayNameZh: String, val referenceWidth: Int, val referenceHeight: Int,
+     val viewportProfileId: String, val requiredMatchRate: Double, val points: List<FingerprintPoint>,
++    val candidateMedians: List<FingerprintPoint> = emptyList(),
+ )
+ data class FingerprintSample(val candidateCount: Int, val fingerprint: PixelFingerprint, val selfMatchRate: Double)
+ data class PixelCandidateFrame(val frameId: Long, val colors: List<IntArray>)
+@@ -39,24 +36,26 @@ object PixelFingerprintSampler {
+ 
+     fun sample(page: FingerprintPage, frames: List<PixelCandidateFrame>, viewport: WindowBounds,
+                profileId: String, others: List<PixelFingerprint>): FingerprintSample? {
+-        if (frames.size < 25 || !viewport.isValid || frames.any { it.colors.size != 192 }) return null
++        if (frames.size < 30 || frames.map { it.frameId }.distinct().size != frames.size || !viewport.isValid || frames.any { it.colors.size != 192 }) return null
+         val candidates = mutableListOf<Pair<FingerprintPoint, Double>>()
++        val medians = mutableListOf<FingerprintPoint>()
++        val otherColors = others.filter { it.referenceWidth == viewport.width && it.referenceHeight == viewport.height && it.viewportProfileId == profileId }
++            .map { other -> other.candidateMedians.associateBy { it.x to it.y } }
+         for ((index, location) in candidateCoordinates(viewport).withIndex()) {
+             val (x, y) = location
+             val colors = frames.map { it.colors[index] }
+             val median = IntArray(3) { c -> colors.map { it[c] }.sorted()[colors.size / 2] }
+             val maxDelta = colors.maxOf { color -> (0..2).maxOf { c -> abs(color[c] - median[c]) } }
+-            if (maxDelta > 12) continue
+             val point = FingerprintPoint(x, y, median[0], median[1], median[2])
+-            val distinct = others.filter { it.referenceWidth == viewport.width && it.referenceHeight == viewport.height && it.viewportProfileId == profileId }
+-                .mapNotNull { other -> other.points.minByOrNull { abs(it.x - x) + abs(it.y - y) } }
++            medians += point
++            if (maxDelta > point.tolerance) continue
++            val distinct = otherColors.mapNotNull { it[x to y] }
+                 .minOfOrNull { other -> (abs(other.r - point.r) + abs(other.g - point.g) + abs(other.b - point.b)).toDouble() / 3 } ?: 128.0
+             candidates += point to (distinct - maxDelta)
+         }
+         val points = candidates.groupBy { (point, _) -> point.x * 5 / viewport.width to point.y * 4 / viewport.height }
+             .values.map { cell -> cell.maxBy { it.second }.first }
+-        if (points.size < 20) return null
+-        val fingerprint = PixelFingerprint(page.pageId, page.displayNameZh, viewport.width, viewport.height, profileId, 0.85, points.take(30))
++        val fingerprint = PixelFingerprint(page.pageId, page.displayNameZh, viewport.width, viewport.height, profileId, 0.85, points.take(30), medians)
+         val self = frames.map { scoreCandidate(it, viewport, fingerprint) }.average()
+         return FingerprintSample(candidates.size, fingerprint, self)
+     }
+@@ -84,6 +83,11 @@ object PixelFingerprintSampler {
+         }.toDouble() / fingerprint.points.size
+     }
+ 
++    fun recognizedPage(fingerprints: List<PixelFingerprint>, scores: Map<String, Double>): String? {
++        val best = fingerprints.filter { it.pageId in scores }.maxByOrNull { scores.getValue(it.pageId) } ?: return null
++        return best.pageId.takeIf { scores.getValue(it) >= best.requiredMatchRate }
++    }
++
+     private fun fits(frame: ScreenFrameSnapshot, viewport: WindowBounds) =
+         viewport.left >= 0 && viewport.top >= 0 && viewport.right <= frame.width && viewport.bottom <= frame.height
+ 
+@@ -100,17 +104,27 @@ class PixelFingerprintStore(private val directory: File) {
+         val json = JSONObject().put("pageId", value.pageId).put("displayNameZh", value.displayNameZh)
+             .put("referenceWidth", value.referenceWidth).put("referenceHeight", value.referenceHeight)
+             .put("viewportProfileId", value.viewportProfileId).put("requiredMatchRate", value.requiredMatchRate)
+-            .put("points", JSONArray().apply { value.points.forEach { p -> put(JSONObject().put("x", p.x).put("y", p.y).put("r", p.r).put("g", p.g).put("b", p.b).put("tolerance", p.tolerance)) } })
+-        File(directory, "${value.pageId}.json").writeText(json.toString())
++            .put("points", encodePoints(value.points))
++            .put("candidateMedians", encodePoints(value.candidateMedians))
++        val temporary = File(directory, "${value.pageId}.tmp")
++        temporary.writeText(json.toString())
++        check(temporary.renameTo(File(directory, "${value.pageId}.json")))
+     }
+ 
+     fun loadAll(): List<PixelFingerprint> = directory.listFiles { file -> file.extension == "json" }.orEmpty().mapNotNull { file ->
+         runCatching {
+             val json = JSONObject(file.readText())
+-            val points = json.getJSONArray("points")
+             PixelFingerprint(json.getString("pageId"), json.getString("displayNameZh"), json.getInt("referenceWidth"),
+                 json.getInt("referenceHeight"), json.getString("viewportProfileId"), json.getDouble("requiredMatchRate"),
+-                (0 until points.length()).map { i -> points.getJSONObject(i).let { FingerprintPoint(it.getInt("x"), it.getInt("y"), it.getInt("r"), it.getInt("g"), it.getInt("b"), it.getInt("tolerance")) } })
++                decodePoints(json.getJSONArray("points")), decodePoints(json.optJSONArray("candidateMedians") ?: JSONArray()))
+         }.getOrNull()
+     }
++
++    private fun encodePoints(points: List<FingerprintPoint>) = JSONArray().apply {
++        points.forEach { p -> put(JSONObject().put("x", p.x).put("y", p.y).put("r", p.r).put("g", p.g).put("b", p.b).put("tolerance", p.tolerance)) }
++    }
++
++    private fun decodePoints(points: JSONArray) = (0 until points.length()).map { i ->
++        points.getJSONObject(i).let { FingerprintPoint(it.getInt("x"), it.getInt("y"), it.getInt("r"), it.getInt("g"), it.getInt("b"), it.getInt("tolerance")) }
++    }
+ }
+diff --git a/app/src/test/java/com/lidquan/yishigame/vision/PixelFingerprintSamplerTest.kt b/app/src/test/java/com/lidquan/yishigame/vision/PixelFingerprintSamplerTest.kt
+index d012b22..ed654b0 100644
+--- a/app/src/test/java/com/lidquan/yishigame/vision/PixelFingerprintSamplerTest.kt
++++ b/app/src/test/java/com/lidquan/yishigame/vision/PixelFingerprintSamplerTest.kt
+@@ -14,6 +14,7 @@ class PixelFingerprintSamplerTest {
+         val result = requireNotNull(PixelFingerprintSampler.sample(page, frames, viewport, "fixed", emptyList()))
+         assertEquals(30, frames.size)
+         assertEquals(20, result.fingerprint.points.size)
++        assertEquals(192, result.fingerprint.candidateMedians.size)
+         assertEquals(1.0, result.selfMatchRate, 0.001)
+         assertEquals(1.0, PixelFingerprintSampler.score(frame(40, 31), viewport, result.fingerprint)!!, 0.001)
+         assertEquals(0.0, PixelFingerprintSampler.score(frame(100, 32), viewport, result.fingerprint)!!, 0.001)
+@@ -21,6 +22,37 @@ class PixelFingerprintSamplerTest {
+         assertEquals(null, PixelFingerprintSampler.score(frame(40, 33), WindowBounds(0, 0, 399, 400), result.fingerprint))
+     }
+ 
++    @Test fun comparesOtherPagesAtExactlyTheSameCoordinate() {
++        val viewport = WindowBounds(0, 0, 400, 400)
++        val frames = (1..30).map { requireNotNull(PixelFingerprintSampler.candidateFrame(frame(40, it.toLong()), viewport)) }
++        val baseline = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], frames, viewport, "fixed", emptyList())).fingerprint
++        val medians = baseline.candidateMedians.mapIndexed { index, point -> if (index == 1) point.copy(r = 200, g = 200, b = 200) else point }
++        val other = baseline.copy(pageId = "AREA_MAP", candidateMedians = medians)
++        val sampled = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], frames, viewport, "fixed", listOf(other)))
++        assertTrue(sampled.fingerprint.points.any { it.x == 50 && it.y == 12 })
++        val misleadingNearby = other.copy(points = other.points.map { it.copy(r = 200, g = 200, b = 200) }, candidateMedians = baseline.candidateMedians)
++        val sameColors = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], frames, viewport, "fixed", listOf(misleadingNearby)))
++        assertEquals(baseline.points, sameColors.fingerprint.points)
++        val wrongProfile = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], frames, viewport, "fixed", listOf(other.copy(viewportProfileId = "different"))))
++        assertEquals(baseline.points, wrongProfile.fingerprint.points)
++    }
++
++    @Test fun honorsEachPageThresholdAndRequiresDistinctRealFrames() {
++        val viewport = WindowBounds(0, 0, 400, 400)
++        val frames = (1..30).map { requireNotNull(PixelFingerprintSampler.candidateFrame(frame(40, it.toLong()), viewport)) }
++        val fingerprint = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], frames, viewport, "fixed", emptyList())).fingerprint
++        assertEquals(null, PixelFingerprintSampler.recognizedPage(listOf(fingerprint.copy(requiredMatchRate = 0.90)), mapOf("HOME" to 0.88)))
++        assertEquals("HOME", PixelFingerprintSampler.recognizedPage(listOf(fingerprint.copy(requiredMatchRate = 0.90)), mapOf("HOME" to 0.91)))
++        assertEquals(null, PixelFingerprintSampler.sample(fingerprintPages[0], List(30) { frames.first() }, viewport, "fixed", emptyList()))
++        assertEquals(null, PixelFingerprintSampler.sample(fingerprintPages[0], frames.take(29), viewport, "fixed", emptyList()))
++        assertEquals(6, fingerprintPages.size)
++        assertTrue(fingerprintPages.none { it.pageId == "BAG_FULL" })
++        val animated = frames.mapIndexed { index, frame -> frame.copy(colors = frame.colors.map { IntArray(3) { if (index % 2 == 0) 40 else 100 } }) }
++        val rejected = requireNotNull(PixelFingerprintSampler.sample(fingerprintPages[0], animated, viewport, "fixed", emptyList()))
++        assertEquals(0, rejected.candidateCount)
++        assertTrue(rejected.fingerprint.points.isEmpty())
++    }
++
+     private fun frame(color: Int, id: Long): ScreenFrameSnapshot {
+         val rgba = ByteArray(400 * 400 * 4)
+         for (i in rgba.indices step 4) {
 diff --git a/codex/handoff/LATEST.md b/codex/handoff/LATEST.md
-index e48d527..18efbf2 100644
+index 55183e2..4f63779 100644
 --- a/codex/handoff/LATEST.md
 +++ b/codex/handoff/LATEST.md
 @@ -1,3 +1,11 @@
-+# 2026-09-25 Diagnostic Run 最新断点
++# 2026-10-13 最新断点：REQ-0007 Review 定向整改，待六页真机标定
 +
-+本轮仅增强私有诊断日志，未扩功能：OCR 结果与置信度、页面候选置信度、ActionIntent/Guard/tap、后置条件观察和具体阻断原因均可在同一 JSONL 会话追踪。AREA_PICKER→AREA_MAP 仍要求点击后的新鲜稳定页及目标地图一致。构建、单元及设备测试通过。
++当前分支仍为 `feat/req-0006-single-dungeon-loop`。本轮统一正式按钮至 2–5 秒内 30 个真实新帧的色点标定；PNG 录制降为诊断里的折叠调试工具。候选 192 点中值私有保存，跨页面以同坐标比较；实时识别遵守每页 requiredMatchRate。清单只保留六个核心页面，BAG_FULL 静态页为 NOT_PRESENT；HOME 包含地图小怪，BATTLE 仅指副本。
 +
-+真机已安装新 APK；Pad ADB 正常，游戏左、助手右，辅助功能及屏幕采集经 PRECHECK 确认。游戏反复断线，唯一新会话止于 `PRECHECK_GAME_NOT_AT_HOME`（8 项 PASS、HOME FAIL，stablePage=`NETWORK_DISCONNECTED`），业务 tap 0。没有到区域切换，也没有 SUCCESS session。下一步待游戏能稳定停在 HOME，再从 PRECHECK 开始逐步跑诊断，不可沿用本次断线前视觉证据。
-+
-+---
-+
- # 最新交接：REQ-0006 — 2026-09-25（未完成）
- 
- 当前分支 `feat/req-0006-single-dungeon-loop`，未合入 main。继续开发的实现包括 PRECHECK、旧 OCR/viewport 结果失效、地图与战斗页面判定冲突修复、断线及背包满受 Guard 控制的恢复、完整动作日志。用户已授权在明确断线弹窗中点击 OCR 识别的“确定”，仍须受 Guard、两次上限和后置条件约束。购买继续禁止自动执行。
-diff --git a/codex/reports/IMPLEMENT-0006.md b/codex/reports/IMPLEMENT-0006.md
-index b49bb7a..090d154 100644
---- a/codex/reports/IMPLEMENT-0006.md
-+++ b/codex/reports/IMPLEMENT-0006.md
-@@ -1,3 +1,11 @@
-+# 2026-09-25 Diagnostic Run 补充（未验收）
-+
-+仅对现有视觉模型与 REQ-0006 日志做小幅修改：每帧保留最多 24 条本地 OCR 结果供私有运行日志记录；运行状态和动作后置观察写入 OCR 文本、原始 OCR confidence、候选页 confidence、稳定页时间和具体阻断原因（包括 `EXPECTED_PAGE_NOT_STABLE`、`PAGE_PREDATES_TAP`、`VIEWPORT_VERSION_CHANGED`、`WINDOW_NOT_ACTIVE_OR_MATCHED`、`TARGET_MAP_UNCONFIRMED`）。SELECT_AREA 仍须新鲜的 AREA_MAP 稳定页、当前 viewport 匹配且 `currentMap == 亡灵之地`，未延长超时。
-+
-+本次真机 PRECHECK 的前八项 PASS，HOME 检查 FAIL：稳定页为 `NETWORK_DISCONNECTED`，最终 `PRECHECK_GAME_NOT_AT_HOME`。零业务点击，未到 AREA_PICKER；无法宣称后置条件已经真机修复。Debug 构建、56 项 JVM 测试及 connected 设备测试通过（其中私有 fixture 测试跳过）。**无真实 SUCCESS。**
++构建与 59 项 JVM 测试通过；设备测试 APK 可编译，但 connected 测试因 No connected devices 失败。ADB 未连接，尚未安装本轮整改版，也没有新增真实指纹、Phase C 数据或 SUCCESS。详见 `codex/reports/IMPLEMENT-0007.md`。原 PNG 资料保留且未上传。下一步重新连接 Pad 后先请求【游戏主页】，一次一个地完成六页标定与切换验证。
 +
 +---
 +
- # IMPLEMENT-0006 — 2026-09-25 续开发（未验收）
+ # 2026-10-02 最新断点：REQ-0007 首轮截图已收集，等待 Review
  
- 本次继续在 `feat/req-0006-single-dungeon-loop` 开发；没有合入 main。修复视觉结果与 viewport 版本、点击后的旧帧竞争；动作后置条件要求新鲜稳定页及目标区域匹配。真机观察到打开区域地图后 `AREA_MAP` 与背景战斗计数同时命中、页面判定为 Ambiguous；现给 `BATTLE` 增加地图/选择器/副本页排除信号，并补 JVM 回归测试。此修复已构建安装，**尚未在联网游戏中完成 SELECT_AREA 回归**。
-diff --git a/codex/reports/runs/REQ-0006-run-summary.md b/codex/reports/runs/REQ-0006-run-summary.md
-index 868d677..6cf486d 100644
---- a/codex/reports/runs/REQ-0006-run-summary.md
-+++ b/codex/reports/runs/REQ-0006-run-summary.md
-@@ -1,3 +1,11 @@
-+# 2026-09-25 Diagnostic Run（新增）
+ 实现截至 `dd9e70d`，分支仍为 `feat/req-0006-single-dungeon-loop`。已安装中文逐页引导采集器，10 类完整截图各 30 张，共 300 张；截图收集不等于色点指纹验证通过。
+diff --git a/codex/reports/IMPLEMENT-0007.md b/codex/reports/IMPLEMENT-0007.md
+index 791bfa1..5f50149 100644
+--- a/codex/reports/IMPLEMENT-0007.md
++++ b/codex/reports/IMPLEMENT-0007.md
+@@ -1,3 +1,31 @@
++# REQ-0007 定向整改（2026-10-13）
 +
-+本轮安装含诊断日志的 APK 后，Pad 游戏左、助手右；辅助功能、MediaProjection 与窗口布局均已恢复并经应用 PRECHECK 检查。游戏在启动前再次弹出“网络错误 / 已与服务器断开连接”。本轮私有 JSONL 会话末尾为 `PRECHECK_CHECKS FAILED / GAME_NOT_AT_HOME`，稳定页 `NETWORK_DISCONNECTED`；九项检查中前八项 PASS、HOME FAIL，最终 `SESSION_END FAILED / PRECHECK_GAME_NOT_AT_HOME`。业务阶段停在 **PRECHECK**，真实游戏业务 tap 为 0。未进入 AREA_MAP、AREA_PICKER 或副本；免费次数、战斗进度、自动战斗状态均无本轮数据，**没有 SUCCESS session**。
++Review：CHANGES_REQUIRED — TARGETED FIX。代码整改已完成，正式六页采样与 Phase C 仍待真机执行。
 +
-+本轮代码只增加私有日志里的 OCR 文本及置信度、页面候选置信度、postcondition 阻断原因；没有因服务器异常绕过 PRECHECK，也没有在错误页继续坐标动作。`AREA_PICKER → AREA_MAP` 新版后置验证尚未取得真机样本。原始日志和截图仍只在 App/本机私有目录，公开仓库仅此脱敏摘要。
++## 本次改动
++
++1. 首页唯一正式「已打开，开始采集」入口直接调用 `sampleFingerprintPage()`。只列 HOME、AREA_MAP、AREA_PICKER、DUNGEON_LIST、DUNGEON_DETAIL、BATTLE 六页，中文说明逐页显示。30 秒 PNG 录制收进「查看诊断」内折叠的开发调试入口，并与正式采样互斥。
++2. 每次只接受点击后新产生的 30 个不同 frameId，在最多 5 秒内读取候选 RGB；通常约 2–3 秒，未采足或稳定点不足时 NEED_RESAMPLE。原始整帧不写入正式标定文件。
++3. 每页 JSON 增加 192 个候选网格坐标的中值颜色 `candidateMedians`。独特性筛选使用其他页面相同坐标的 RGB；位置／尺寸 Profile 不同的页面不参与比较。正式实时匹配仍只读取最终约 20 个点。旧 JSON 缺少候选中值时不算本轮标定完成，保留原文件待重新标定。
++4. 实时识别最高得分页必须满足它自己的 `requiredMatchRate`；不再固定使用 0.85。
++5. BAG_FULL 静态页记录 NOT_PRESENT，移出采样清单。没有新增背包满文字事件或自动出售流程。HOME 说明明确包含地图小怪动画及进度；BATTLE 说明仅指地下城副本。
++6. 标定结果显示实际帧数、候选稳定点数、最终点数、自身命中率、其他页面最高得分、分差、PASS／NEED_RESAMPLE。通过的摘要另存 App 私有目录。首个页面没有其他页面参照，界面明确提示跨页面区分仍待验证，单页 PASS 不等于 Phase C 完成。
++
++## 验证与当前阻塞
++
++- Debug 构建和 59 项 JVM 测试通过。新增针对同坐标比较、每页阈值、重复／不足帧拒绝、动态候选剔除及 Profile 不匹配的回归检查。
++- 新增设备测试覆盖候选中值和阈值的 JSON 保存／读取。设备测试 APK 已编译；`connectedDebugAndroidTest` 因没有连接设备失败（No connected devices），没有虚报设备测试通过。
++- 差异格式检查及公开仓库安全扫描通过。此次未上传任何原始截图或私有配置。
++- 本轮 ADB 设备列表为空，新版尚未安装到 Pad；用户已收到重新连接提示。
++
++正式 fingerprint 已采集列表：无新增真机采样。各页点数／命中率尚无真机数据。六页切换误识别、UNKNOWN 比例尚未验证。没有接回 REQ-0006，没有新增 SUCCESS 或同日 SKIP 证据。
++
++下一步：Pad 重新连接后安装本构建、确认已有标准窗口与采集权限，先只请求【游戏主页】。用户明确打开后采 30 帧并报告结果；逐页推进六个核心页面，再实测 Phase C。六页能够稳定区分后停止扩充页面库，准备接回 REQ-0006。不扩大多角色、多副本、技能、Guard、PRECHECK 或云端识图。
++
++以下保留首轮 PNG 资料收集结论，不能将它们当作本轮正式指纹结果。
 +
 +---
 +
- # REQ-0006 真机运行脱敏摘要 — 2026-09-25 续测
+ # REQ-0007 实现与采集结论（2026-10-02）
  
- - Pad 经 ADB 授权连接；游戏左、助手右的窗口布局已在截图中核验。两次已保存的私有 JSONL 会话均执行 PRECHECK，且检查项 9/9 通过；原始 sessionId、截图、JSONL 留在本机私有目录。
+ 状态：Phase A 已实现并安装；Phase B 已完成首轮截图收集及部分人工核对。尚未完成真实指纹库标定和 Phase C 识别验证，未进入 Phase D 业务接回。
